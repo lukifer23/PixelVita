@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PixelVita</string>
+    <string name="download">Download</string>
+    <string name="delete">Delete</string>
+    <string name="generate">Generate</string>
+    <string name="prompt_hint">Enter your prompt here…</string>
+    <string name="negative_prompt_hint">Enter negative prompt (optional)</string>
+    <string name="steps">Steps</string>
+    <string name="seed">Seed</string>
+    <string name="random_seed">Random Seed</string>
+    <string name="select_image">Select Image</string>
+    <string name="error_model_load">Failed to load the model</string>
+    <string name="error_download">Failed to download the model. Please check your internet connection and try again.</string>
+    
+    <!-- New strings for enhanced UI -->
+    <string name="generate_image">Generate Image</string>
+    <string name="navigate_back">Navigate back</string>
+    <string name="hide_advanced">Hide advanced settings</string>
+    <string name="show_advanced">Show advanced settings</string>
+    <string name="select_model">Select Model</string>
+    <string name="select_model_hint">Select a model</string>
+    <string name="no_models_available">Please download a model first</string>
+    <string name="advanced_settings">Advanced Settings</string>
+    <string name="clear_image">Clear image</string>
+    <string name="add_image">Click to add an image</string>
+    <string name="randomize">Randomize</string>
+    <string name="share">Share image</string>
+    <string name="generating_progress">Generating image: %d%%</string>
+    
+    <!-- Error Messages -->
+    <string name="error_no_internet">No internet connection available</string>
+    <string name="error_network">Network error occurred. Please check your connection</string>
+    <string name="error_out_of_memory">Not enough memory to load the model</string>
+    <string name="error_unknown">An unknown error occurred</string>
+    <string name="error_storage">Not enough storage space</string>
+    <string name="error_database">Database operation failed</string>
+    <string name="error_resource">Resource error occurred</string>
+    <string name="error_validation">Validation error occurred</string>
+    <string name="error_generation_failed">Image generation failed</string>
+    
+    <!-- Dialog Messages -->
+    <string name="dialog_confirm">Confirm</string>
+    <string name="dialog_cancel">Cancel</string>
+    <string name="dialog_retry">Retry</string>
+    
+    <!-- Settings -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_optimization">Optimization</string>
+    <string name="settings_use_gpu">Use GPU Acceleration</string>
+    <string name="settings_use_nnapi">Use Neural Networks API</string>
+    <string name="settings_num_threads">Number of Threads</string>
+    <string name="settings_memory">Memory Management</string>
+    <string name="settings_cache_size">Cache Size</string>
+    <string name="settings_image_size">Default Image Size</string>
+
+    <!-- Permissions -->
+    <string name="permission_required">Permission Required</string>
+    <string name="storage_permission_rationale">Storage permission is required to save and share generated images.</string>
+    <string name="grant_permission">Grant Permission</string>
+    <string name="deny">Deny</string>
+
+    <!-- Notifications -->
+    <string name="notification_channel_name">Success Notifications</string>
+    <string name="notification_channel_description">Notifications for successful operations</string>
+    <string name="notification_image_saved_title">Image Saved</string>
+    <string name="notification_image_saved_text">Your generated image has been saved</string>
+    <string name="notification_generation_complete_title">Generation Complete</string>
+    <string name="notification_generation_complete_text">Your image has been generated successfully</string>
+
+    <!-- UI Components -->
+    <string name="prompt_settings">Prompt Settings</string>
+    <string name="collapse">Collapse</string>
+    <string name="expand">Expand</string>
+    <string name="warning">Warning</string>
+    <string name="info">Information</string>
+    <string name="success">Success</string>
+    <string name="save">Save image</string>
+    
+    <!-- Animations -->
+    <string name="loading_animation">Loading animation</string>
+    <string name="shimmer_animation">Shimmer animation</string>
+    <string name="gradient_animation">Gradient animation</string>
+    
+    <!-- Accessibility -->
+    <string name="card_gradient_background">Card gradient background</string>
+    <string name="glass_effect_background">Glass effect background</string>
+    <string name="dropdown_menu">Dropdown menu</string>
+    <string name="text_input_field">Text input field</string>
+    
+    <!-- Tooltips -->
+    <string name="tooltip_advanced_settings">Show or hide advanced settings</string>
+    <string name="tooltip_model_selection">Select a model for image generation</string>
+    <string name="tooltip_prompt_input">Enter your image description here</string>
+    <string name="tooltip_negative_prompt">Specify what you don\'t want in the image</string>
+    
+    <!-- Status Messages -->
+    <string name="status_ready">Ready to generate</string>
+    <string name="status_loading_model">Loading model…</string>
+    <string name="status_preparing">Preparing generation…</string>
+    <string name="status_complete">Generation complete</string>
+    
+    <!-- Placeholders -->
+    <string name="placeholder_prompt">A beautiful landscape with mountains…</string>
+    <string name="placeholder_negative_prompt">blur, low quality, distorted…</string>
+
+    <string name="settings">Settings</string>
+    <string name="memory_management">Memory Management</string>
+    <string name="memory_stats">Memory Stats</string>
+    <string name="total_memory">Total Memory: %1$dMB</string>
+    <string name="available_memory">Available Memory: %1$dMB</string>
+    <string name="effective_limit">Effective Limit: %1$dMB</string>
+    <string name="memory_limit">Memory Limit</string>
+    <string name="memory_limit_description">Set a custom memory limit for model loading</string>
+    <string name="memory_limit_value">Current limit: %1$dMB</string>
+    <string name="low_memory_mode">Low Memory Mode</string>
+    <string name="low_memory_mode_description">Reduces memory usage at the cost of performance</string>
+    <string name="reset_to_defaults">Reset to Defaults</string>
+</resources> 

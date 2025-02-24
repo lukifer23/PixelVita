@@ -1,0 +1,61 @@
+# Build output directories
+.gradle
+build/
+app/build/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# IDE files
+.idea/
+*.iml
+.navigation/
+.vscode/
+
+# Local configuration
+local.properties
+
+# Compiled files
+*.class
+*.dex
+*.apk
+*.aab
+*.so
+*.o
+*.a
+
+# Model files
+*.onnx
+*.pt
+*.bin
+*.gguf
+*.safetensors
+/Model/
+/app/src/main/assets/models/*
+!/app/src/main/assets/models/sd35_medium_optimized/model_config.json
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Debug and release
+app/release/
+app/debug/
+app/benchmark/
+
+# Keys and credentials
+*.jks
+*.keystore
+keystore.properties
+google-services.json
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+*~ 

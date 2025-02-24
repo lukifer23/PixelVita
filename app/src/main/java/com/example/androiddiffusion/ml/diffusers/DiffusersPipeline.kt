@@ -1,0 +1,823 @@
+package com.example.androiddiffusion.ml.diffusers
+
+// Android imports
+import android.content.Context
+import android.content.Intent
+import android.graphics.Bitmap
+
+// ONNX Runtime imports
+import ai.onnxruntime.OrtEnvironment
+import ai.onnxruntime.OrtSession
+import ai.onnxruntime.OnnxTensor
+import ai.onnxruntime.TensorInfo
+
+// App imports
+import com.example.androiddiffusion.config.ModelConfig
+import com.example.androiddiffusion.config.MemoryManager
+import com.example.androiddiffusion.util.NativeMemoryManager
+import com.example.androiddiffusion.service.ModelLoadingService
+import com.example.androiddiffusion.util.Logger
+import com.example.androiddiffusion.data.DiffusionModel
+
+// Dependency injection
+import dagger.hilt.android.qualifiers.ApplicationContext
+import javax.inject.Inject
+import javax.inject.Singleton
+
+// Kotlin coroutines
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+
+// Java/Kotlin standard library
+import java.io.File
+import java.nio.FloatBuffer
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import kotlin.random.Random
+import kotlin.math.sqrt
+
+// App-specific imports
+import com.example.androiddiffusion.ml.diffusers.schedulers.DDIMScheduler
+
+@Singleton
+class DiffusersPipeline @Inject constructor(
+    @ApplicationContext private val context: Context,
+    private val tokenizer: TextTokenizer,
+    private val memoryManager: MemoryManager,
+    private val nativeMemoryManager: NativeMemoryManager,
+    private val onProgressUpdate: (Float) -> Unit = {}
+) : AutoCloseable {
+    companion object {
+        private const val COMPONENT = "DiffusersPipeline"
+        private const val DEFAULT_WIDTH = ModelConfig.InferenceSettings.DEFAULT_IMAGE_SIZE
+        private const val DEFAULT_HEIGHT = ModelConfig.InferenceSettings.DEFAULT_IMAGE_HEIGHT
+        private const val LATENT_CHANNELS = 4
+        private const val TEXT_EMBEDDING_SIZE = 768
+        private const val MAX_TEXT_LENGTH = 77
+        private const val BATCH_SIZE = 1
+        private const val MAX_MEMORY_BYTES = 2048L * 1024 * 1024  // 2GB
+        private const val MIN_MEMORY_BYTES = 1024L * 1024 * 1024  // 1GB
+        private const val SESSION_INIT_TIMEOUT_MS = 10000L // 10 seconds
+    }
+
+    private var textEncoder: OnnxModel? = null
+    private var unet: OnnxModel? = null
+    private var vaeDecoder: OnnxModel? = null
+    private var scheduler: DDIMScheduler? = null
+    private var isLowMemoryMode = true
+    private var lastGCTime = 0L
+    private val GC_INTERVAL_MS = 30000L // 30 seconds between GC calls
+    private var session: OrtSession? = null
+    private val sessionLock = Any()
+    private var isInitialized = false
+    private var env: OrtEnvironment? = null
+    private var sessionOptions: OrtSession.SessionOptions? = null
+    private var currentModel: DiffusionModel? = null
+    private var lastError: Exception? = null
+    
+    init {
+        Logger.d(COMPONENT, "Pipeline created in low memory mode")
+        if (isLowMemoryMode) {
+            Logger.d(COMPONENT, "Low memory mode enabled")
+        }
+        Runtime.getRuntime().addShutdownHook(Thread {
+            cleanup()
+        })
+        setupOnnxRuntime()
+    }
+
+    private fun setupOnnxRuntime() {
+        env = OrtEnvironment.getEnvironment()
+        sessionOptions = OrtSession.SessionOptions().apply {
+            setIntraOpNumThreads(ModelConfig.Performance.NUM_THREADS)
+            setMemoryPatternOptimization(ModelConfig.Performance.ENABLE_MEMORY_PATTERN)
+            addConfigEntry("session.graph_optimization_level", "ORT_ENABLE_BASIC")
+            addConfigEntry("session.use_memory_arena", "1")
+            addConfigEntry("session.force_sequential_execution", "1")
+        }
+    }
+
+    private fun createSession(modelPath: String): OrtSession {
+        return env?.createSession(modelPath, sessionOptions) 
+            ?: throw IllegalStateException("Failed to create ONNX session")
+    }
+
+    private fun checkMemoryForComponent(requiredMemoryMB: Long, componentName: String) {
+        if (!memoryManager.ensureMemoryAvailable(requiredMemoryMB)) {
+            throw OutOfMemoryError("Not enough memory to load $componentName. Required: ${requiredMemoryMB}MB")
+        }
+    }
+
+    fun setLowMemoryMode(enabled: Boolean) {
+        isLowMemoryMode = enabled
+        Logger.d(COMPONENT, "Low memory mode ${if (enabled) "enabled" else "disabled"}")
+    }
+
+    private fun initializeIfNeeded() {
+        if (!isInitialized) {
+            Logger.d(COMPONENT, "Initializing pipeline")
+            sessionOptions?.apply {
+                // Core optimizations
+                addConfigEntry("session.graph_optimization_level", "ORT_ENABLE_ALL")
+                setIntraOpNumThreads(Runtime.getRuntime().availableProcessors())
+                setMemoryPatternOptimization(true)
+                
+                // Basic memory optimizations that don't require large allocations
+                addConfigEntry("session.use_memory_arena", "1")
+                addConfigEntry("session.force_sequential_execution", "1")
+            }
+            isInitialized = true
+        }
+    }
+
+    private fun getAvailableMemory(): Long {
+        val runtime = Runtime.getRuntime()
+        val maxMemory = runtime.maxMemory()
+        val totalMemory = runtime.totalMemory()
+        val freeMemory = runtime.freeMemory()
+        val availableMemory = maxMemory - (totalMemory - freeMemory)
+        
+        Logger.d(COMPONENT, "Memory Stats - Max: ${maxMemory/(1024*1024)}MB, " +
+                          "Total: ${totalMemory/(1024*1024)}MB, " +
+                          "Free: ${freeMemory/(1024*1024)}MB, " +
+                          "Available: ${availableMemory/(1024*1024)}MB")
+        return availableMemory
+    }
+
+    private fun ensureMemoryAvailable(requiredMemoryMB: Long) {
+        if (!memoryManager.ensureMemoryAvailable(requiredMemoryMB)) {
+            val availableMemory = memoryManager.getAvailableMemory()
+            throw OutOfMemoryError(
+                "Insufficient memory for operation. Available: ${availableMemory}MB, Required: ${requiredMemoryMB}MB"
+            )
+        }
+    }
+
+    private fun checkMemoryAndCleanup() {
+        val currentTime = System.currentTimeMillis()
+        if (currentTime - lastGCTime > GC_INTERVAL_MS) {
+            val runtime = Runtime.getRuntime()
+            val usedMemory = runtime.totalMemory() - runtime.freeMemory()
+            val maxMemory = runtime.maxMemory()
+            val memoryUsage = usedMemory.toFloat() / maxMemory
+
+            when {
+                memoryUsage > ModelConfig.MemorySettings.MEMORY_THRESHOLD_CRITICAL -> {
+                    Logger.w(COMPONENT, "Critical memory usage: ${(memoryUsage * 100).toInt()}%")
+                    cleanup()
+                    System.gc()
+                    Runtime.getRuntime().gc()
+                    Thread.sleep(100)  // Give GC time to work
+                }
+                memoryUsage > ModelConfig.MemorySettings.MEMORY_THRESHOLD_WARNING -> {
+                    Logger.w(COMPONENT, "High memory usage: ${(memoryUsage * 100).toInt()}%")
+                    System.gc()
+                }
+            }
+            lastGCTime = currentTime
+        }
+    }
+
+    private suspend fun initializeSession(modelFile: File) = withContext(Dispatchers.IO) {
+        try {
+            withTimeout(SESSION_INIT_TIMEOUT_MS) {
+                Logger.d(COMPONENT, "Creating new session")
+                val runtime = Runtime.getRuntime()
+                val maxMemory = runtime.maxMemory()
+                val usedMemory = runtime.totalMemory() - runtime.freeMemory()
+                val availableMemory = maxMemory - usedMemory
+                
+                Logger.d(COMPONENT, "Memory before session creation:")
+                Logger.d(COMPONENT, "Max memory: ${maxMemory / (1024 * 1024)}MB")
+                Logger.d(COMPONENT, "Used memory: ${usedMemory / (1024 * 1024)}MB")
+                Logger.d(COMPONENT, "Available memory: ${availableMemory / (1024 * 1024)}MB")
+                
+                if (availableMemory < MIN_MEMORY_BYTES) {
+                    Logger.w(COMPONENT, "Low memory condition detected, forcing garbage collection")
+                    System.gc()
+                    Runtime.getRuntime().gc()
+                    Thread.sleep(100) // Give GC time to work
+                }
+                
+                val newSession = createSession(modelFile.path)
+                
+                synchronized(sessionLock) {
+                    session = newSession
+                    isInitialized = true
+                    logModelInfo()
+                }
+                Logger.d(COMPONENT, "Session initialized successfully")
+                
+                // Verify session is working
+                try {
+                    val inputInfo = session?.inputInfo
+                    val outputInfo = session?.outputInfo
+                    Logger.d(COMPONENT, "Session verification - Inputs: ${inputInfo?.size}, Outputs: ${outputInfo?.size}")
+                } catch (e: Exception) {
+                    Logger.e(COMPONENT, "Session verification failed", e)
+                    throw ModelLoadException("Session verification failed: ${e.message}", e)
+                }
+            }
+        } catch (e: Exception) {
+            throw ModelLoadException("Session initialization failed: ${e.message}", e)
+        }
+    }
+
+    suspend fun loadModel(modelPath: String, onProgress: (String, Int) -> Unit) = withContext(Dispatchers.Default) {
+        try {
+            Logger.d(COMPONENT, "=== Starting Model Loading Process ===")
+            logInitialMemoryState()
+            onProgress("init", 0)
+
+            // Force cleanup and GC before starting
+            cleanup()
+            performGarbageCollection()
+            onProgress("cleanup", 5)
+            
+            // Verify available memory
+            val requiredMemory = ModelConfig.MemorySettings.TOTAL_MODEL_MEMORY_MB
+            if (!memoryManager.ensureMemoryAvailable(requiredMemory)) {
+                throw OutOfMemoryError("Insufficient memory to load models. Required: ${requiredMemory}MB, Available: ${memoryManager.getAvailableMemory()}MB")
+            }
+            onProgress("memory_check", 10)
+
+            // Verify model files exist
+            val requiredFiles = listOf(
+                "$modelPath/text_encoder.onnx",
+                "$modelPath/unet.onnx",
+                "$modelPath/vae_decoder.onnx"
+            )
+            
+            requiredFiles.forEach { path ->
+                try {
+                    context.assets.open(path).use { 
+                        Logger.d(COMPONENT, "Verified model file: $path")
+                        it.close() 
+                    }
+                } catch (e: Exception) {
+                    throw ModelLoadException("Missing required model file: $path", e)
+                }
+            }
+            onProgress("verify_files", 15)
+
+            try {
+                // Step 1: Initialize scheduler (lightweight operation)
+                Logger.d(COMPONENT, "=== Phase 1: Scheduler Initialization ===")
+                scheduler = DDIMScheduler()
+                scheduler?.setTimesteps(ModelConfig.InferenceSettings.DEFAULT_STEPS)
+                Logger.d(COMPONENT, "Scheduler initialized successfully")
+                onProgress("scheduler", 20)
+                logMemoryState("After scheduler initialization")
+                performGarbageCollection()
+
+                // Step 2: Load text encoder
+                Logger.d(COMPONENT, "=== Phase 2: Text Encoder Loading ===")
+                if (!memoryManager.ensureMemoryAvailable(ModelConfig.MemorySettings.TEXT_ENCODER_MEMORY_MB)) {
+                    throw OutOfMemoryError("Insufficient memory for text encoder")
+                }
+                onProgress("text_encoder_init", 25)
+                textEncoder = OnnxModel(context, "$modelPath/text_encoder.onnx", true, nativeMemoryManager)
+                textEncoder?.loadModel { stage, progress -> 
+                    onProgress("text_encoder_$stage", 25 + (progress * 0.15).toInt())
+                }
+                onProgress("text_encoder_verify", 40)
+                Logger.d(COMPONENT, "Text encoder loaded successfully")
+                logMemoryState("After text encoder loading")
+                performGarbageCollection()
+
+                // Step 3: Load UNet
+                Logger.d(COMPONENT, "=== Phase 3: UNet Loading ===")
+                if (!memoryManager.ensureMemoryAvailable(ModelConfig.MemorySettings.UNET_MEMORY_MB)) {
+                    throw OutOfMemoryError("Insufficient memory for UNet")
+                }
+                onProgress("unet_init", 45)
+                unet = OnnxModel(context, "$modelPath/unet.onnx", true, nativeMemoryManager)
+                unet?.loadModel { stage, progress ->
+                    onProgress("unet_$stage", 45 + (progress * 0.25).toInt())
+                }
+                onProgress("unet_verify", 70)
+                Logger.d(COMPONENT, "UNet loaded successfully")
+                logMemoryState("After UNet loading")
+                performGarbageCollection()
+
+                // Step 4: Load VAE
+                Logger.d(COMPONENT, "=== Phase 4: VAE Loading ===")
+                if (!memoryManager.ensureMemoryAvailable(ModelConfig.MemorySettings.VAE_MEMORY_MB)) {
+                    throw OutOfMemoryError("Insufficient memory for VAE")
+                }
+                onProgress("vae_init", 75)
+                vaeDecoder = OnnxModel(context, "$modelPath/vae_decoder.onnx", true, nativeMemoryManager)
+                vaeDecoder?.loadModel { stage, progress ->
+                    onProgress("vae_$stage", 75 + (progress * 0.20).toInt())
+                }
+                onProgress("vae_verify", 95)
+                Logger.d(COMPONENT, "VAE loaded successfully")
+                logMemoryState("After VAE loading")
+
+                onProgress("complete", 100)
+                Logger.d(COMPONENT, "=== Model Loading Complete ===")
+                logFinalMemoryState()
+
+            } catch (e: Exception) {
+                Logger.e(COMPONENT, "Error during model loading", e)
+                cleanup()
+                throw e
+            }
+        } catch (e: Exception) {
+            Logger.e(COMPONENT, "Fatal error during model loading", e)
+            cleanup()
+            throw e
+        }
+    }
+
+    private fun logInitialMemoryState() {
+        Logger.d(COMPONENT, "Initial Memory Status:")
+        Logger.d(COMPONENT, "Available Memory: ${memoryManager.getAvailableMemory()}MB")
+        Logger.d(COMPONENT, "Total Memory: ${memoryManager.getTotalMemory()}MB")
+        Logger.d(COMPONENT, "Effective Limit: ${memoryManager.getEffectiveMemoryLimit()}MB")
+        Logger.d(COMPONENT, "Native Memory Available: ${nativeMemoryManager.getAvailableMemoryMB()}MB")
+        Logger.d(COMPONENT, "Low Memory Mode: $isLowMemoryMode")
+    }
+
+    private fun logMemoryState(phase: String) {
+        Logger.d(COMPONENT, "Memory Status - $phase:")
+        Logger.d(COMPONENT, "Java Heap - Available: ${getAvailableMemory() / (1024 * 1024)}MB")
+        Logger.d(COMPONENT, "Native Memory - Available: ${nativeMemoryManager.getAvailableMemoryMB()}MB")
+        Logger.d(COMPONENT, "Memory Usage: ${(getMemoryUsage() * 100).toInt()}%")
+    }
+
+    private fun logFinalMemoryState() {
+        Logger.d(COMPONENT, "Final Memory Status:")
+        Logger.d(COMPONENT, "System Memory:")
+        Logger.d(COMPONENT, "- Available Memory: ${memoryManager.getAvailableMemory()}MB")
+        Logger.d(COMPONENT, "- Total Memory: ${memoryManager.getTotalMemory()}MB")
+        Logger.d(COMPONENT, "- Memory Usage: ${(getMemoryUsage() * 100).toInt()}%")
+        
+        Logger.d(COMPONENT, "Native Memory:")
+        Logger.d(COMPONENT, "- Available: ${nativeMemoryManager.getAvailableMemoryMB()}MB")
+        
+        Logger.d(COMPONENT, "Component Status:")
+        val componentStatus = getLoadedComponents()
+        Logger.d(COMPONENT, "- Text Encoder: ${componentStatus.textEncoder}")
+        Logger.d(COMPONENT, "- UNet: ${componentStatus.unet}")
+        Logger.d(COMPONENT, "- VAE: ${componentStatus.vae}")
+        Logger.d(COMPONENT, "- Scheduler: ${componentStatus.scheduler}")
+        
+        Logger.d(COMPONENT, "Component Memory Usage:")
+        textEncoder?.let { encoder ->
+            Logger.d(COMPONENT, "- Text Encoder Buffer: ${if (encoder.getModelBuffer() != 0L) "Allocated" else "Not Allocated"}")
+        }
+        unet?.let { unetModel ->
+            Logger.d(COMPONENT, "- UNet Buffer: ${if (unetModel.getModelBuffer() != 0L) "Allocated" else "Not Allocated"}")
+        }
+        vaeDecoder?.let { vae ->
+            Logger.d(COMPONENT, "- VAE Buffer: ${if (vae.getModelBuffer() != 0L) "Allocated" else "Not Allocated"}")
+        }
+        
+        Logger.d(COMPONENT, "Pipeline State:")
+        Logger.d(COMPONENT, "- Initialization Status: $isInitialized")
+        Logger.d(COMPONENT, "- Current Model: ${currentModel?.name ?: "None"}")
+        Logger.d(COMPONENT, "- Last Error: ${lastError?.message ?: "None"}")
+    }
+
+    private data class ComponentStatus(
+        val textEncoder: String,
+        val unet: String,
+        val vae: String,
+        val scheduler: String
+    )
+
+    private fun getLoadedComponents(): ComponentStatus {
+        return ComponentStatus(
+            textEncoder = textEncoder?.let { 
+                if (it.isSessionInitialized()) "Initialized" else "Loaded but not initialized"
+            } ?: "Not loaded",
+            unet = unet?.let {
+                if (it.isSessionInitialized()) "Initialized" else "Loaded but not initialized"
+            } ?: "Not loaded",
+            vae = vaeDecoder?.let {
+                if (it.isSessionInitialized()) "Initialized" else "Loaded but not initialized"
+            } ?: "Not loaded",
+            scheduler = if (scheduler != null) "Initialized" else "Not loaded"
+        )
+    }
+
+    private fun getMemoryUsage(): Float {
+        val runtime = Runtime.getRuntime()
+        val usedMemory = runtime.totalMemory() - runtime.freeMemory()
+        return usedMemory.toFloat() / runtime.maxMemory()
+    }
+
+    private fun performGarbageCollection() {
+        Logger.d(COMPONENT, "Initiating garbage collection...")
+        Logger.d(COMPONENT, "Pre-GC Memory State:")
+        logFinalMemoryState()
+        
+        System.gc()
+        Runtime.getRuntime().gc()
+        Thread.sleep(100)
+        
+        Logger.d(COMPONENT, "Post-GC Memory State:")
+        logFinalMemoryState()
+        Logger.d(COMPONENT, "Garbage collection completed")
+    }
+
+    private fun allocateComponentMemory(component: String, requiredMemoryMB: Long): Long {
+        Logger.d(COMPONENT, "Attempting to allocate ${requiredMemoryMB}MB for $component")
+        
+        // Try native memory allocation
+        val buffer = ByteBuffer.allocateDirect(requiredMemoryMB.toInt())
+        buffer.order(ByteOrder.nativeOrder())
+        if (buffer.capacity() > 0) {
+            val nativeAddress = buffer.asLongBuffer().get(0)
+            if (nativeMemoryManager.lockBuffer(nativeAddress)) {
+                Logger.d(COMPONENT, "Successfully allocated native memory for $component")
+                return nativeAddress
+            }
+            nativeMemoryManager.freeBuffer(nativeAddress)
+        }
+
+        // Fall back to Java heap
+        Logger.d(COMPONENT, "Falling back to Java heap for $component")
+        if (!memoryManager.ensureMemoryAvailable(requiredMemoryMB)) {
+            throw OutOfMemoryError("Failed to allocate memory for $component. Required: ${requiredMemoryMB}MB")
+        }
+        return 0L // Indicates using Java heap
+    }
+
+    private fun releaseComponentMemory(component: String, buffer: Long) {
+        if (buffer != 0L) {
+            try {
+                nativeMemoryManager.unlockBuffer(buffer)
+                nativeMemoryManager.freeBuffer(buffer)
+                Logger.d(COMPONENT, "Released native memory for $component")
+            } catch (e: Exception) {
+                Logger.e(COMPONENT, "Error releasing native memory for $component", e)
+            }
+        }
+        performGarbageCollection()
+    }
+
+    suspend fun generateImage(
+        prompt: String,
+        negativePrompt: String = "",
+        numInferenceSteps: Int = ModelConfig.InferenceSettings.DEFAULT_STEPS,
+        guidanceScale: Float = ModelConfig.InferenceSettings.DEFAULT_GUIDANCE_SCALE,
+        width: Int = DEFAULT_WIDTH,
+        height: Int = DEFAULT_HEIGHT,
+        seed: Long = System.currentTimeMillis(),
+        onProgress: suspend (Int) -> Unit = {}
+    ): Bitmap = withContext(Dispatchers.Default) {
+        try {
+            validateComponents()
+            
+            // 1. Encode text
+            val promptEmbedding = encodeText(prompt)
+            val negativeEmbedding = if (negativePrompt.isNotEmpty()) {
+                encodeText(negativePrompt)
+            } else {
+                createEmptyEmbedding()
+            }
+
+            // 2. Generate initial latents
+            var latents = generateInitialLatents(seed, width, height)
+
+            // 3. Diffusion process
+            val timesteps = scheduler!!.getTimesteps()
+            for (step in 0 until numInferenceSteps) {
+                val progress = ((step + 1) * 100) / numInferenceSteps
+                onProgress(progress)
+
+                latents = performDiffusionStep(
+                    latents = latents,
+                    timestep = timesteps[step],
+                    promptEmbedding = promptEmbedding,
+                    negativeEmbedding = negativeEmbedding,
+                    guidanceScale = guidanceScale
+                )
+            }
+
+            // 4. Decode latents to image
+            decodeLatentsToImage(latents, width, height)
+        } catch (e: Exception) {
+            Logger.e(COMPONENT, "Error generating image", e)
+            throw GenerationException("Failed to generate image: ${e.message}", e)
+        }
+    }
+
+    private fun validateComponents() {
+        if (textEncoder?.loadingState?.value !is OnnxModel.LoadingState.Loaded) {
+            throw IllegalStateException("Text encoder not loaded")
+        }
+        if (unet?.loadingState?.value !is OnnxModel.LoadingState.Loaded) {
+            throw IllegalStateException("UNet not loaded")
+        }
+        if (vaeDecoder?.loadingState?.value !is OnnxModel.LoadingState.Loaded) {
+            throw IllegalStateException("VAE decoder not loaded")
+        }
+        if (scheduler == null) {
+            throw IllegalStateException("Scheduler not initialized")
+        }
+    }
+
+    private suspend fun encodeText(text: String): FloatArray {
+        Logger.d(COMPONENT, "Encoding text: '$text'")
+        Logger.memory(COMPONENT)
+        
+        if (textEncoder?.isSessionInitialized() != true) {
+            throw IllegalStateException("Text encoder not initialized")
+        }
+        
+        return try {
+            val tokens = tokenizer.tokenize(text)
+            Logger.d(COMPONENT, "Text tokenized to ${tokens.size} tokens")
+            
+            val inputShape = longArrayOf(1, tokens.size.toLong())
+            val inputTensor = TensorUtils.createInputTensor(tokens, inputShape)
+            Logger.d(COMPONENT, "Created text encoder input tensor with shape: ${inputShape.joinToString()}")
+            
+            Logger.d(COMPONENT, "Running text encoder inference")
+            val outputs = withContext(Dispatchers.Default) {
+                textEncoder?.runInference(mapOf("input_ids" to inputTensor))
+                    ?: throw IllegalStateException("Text encoder returned null output")
+            }
+            
+            val lastHiddenState = outputs["last_hidden_state"]
+                ?: throw IllegalStateException("Missing last_hidden_state in output")
+            
+            TensorUtils.tensorToFloatArray(lastHiddenState)
+        } catch (e: Exception) {
+            Logger.e(COMPONENT, "Error encoding text", e)
+            throw e
+        }
+    }
+
+    private fun createEmptyEmbedding(): FloatArray {
+        return FloatArray(BATCH_SIZE * MAX_TEXT_LENGTH * TEXT_EMBEDDING_SIZE)
+    }
+
+    private suspend fun generateInitialLatents(seed: Long, width: Int, height: Int): FloatArray = withContext(Dispatchers.Default) {
+        Logger.d(COMPONENT, "Generating initial latents with seed: $seed")
+        Logger.memory(COMPONENT)
+
+        val random = Random(seed)
+        val latentWidth = width / 8
+        val latentHeight = height / 8
+        val totalElements = BATCH_SIZE * LATENT_CHANNELS * latentWidth * latentHeight
+        
+        Logger.d(COMPONENT, "Latent dimensions: ${latentWidth}x${latentHeight}, total elements: $totalElements")
+        
+        // Generate random latents using Box-Muller transform
+        val latents = FloatArray(totalElements)
+        var i = 0
+        while (i < totalElements) {
+            val u1 = random.nextDouble()
+            val u2 = random.nextDouble()
+            
+            val z1 = sqrt(-2.0 * kotlin.math.ln(u1)) * kotlin.math.cos(2.0 * kotlin.math.PI * u2)
+            latents[i] = z1.toFloat()
+            i++
+            
+            if (i < totalElements) {
+                val z2 = sqrt(-2.0 * kotlin.math.ln(u1)) * kotlin.math.sin(2.0 * kotlin.math.PI * u2)
+                latents[i] = z2.toFloat()
+                i++
+            }
+        }
+        
+        // Scale latents
+        val noiseStd = scheduler!!.getInitialNoiseStd()
+        Logger.d(COMPONENT, "Scaling latents with noise std: $noiseStd")
+        for (j in latents.indices) {
+            latents[j] *= noiseStd
+        }
+        
+        Logger.memory(COMPONENT)
+        latents
+    }
+
+    private suspend fun performDiffusionStep(
+        latents: FloatArray,
+        timestep: Int,
+        promptEmbedding: FloatArray,
+        negativeEmbedding: FloatArray,
+        guidanceScale: Float
+    ): FloatArray = withContext(Dispatchers.Default) {
+        Logger.d(COMPONENT, "Performing diffusion step at timestep: $timestep")
+        Logger.memory(COMPONENT)
+
+        // Create tensors for UNet input
+        val latentShape = longArrayOf(BATCH_SIZE.toLong() * 2, LATENT_CHANNELS.toLong(), (DEFAULT_HEIGHT / 8).toLong(), (DEFAULT_WIDTH / 8).toLong())
+        val timestepShape = longArrayOf(1)
+        val embeddingShape = longArrayOf(BATCH_SIZE.toLong() * 2, MAX_TEXT_LENGTH.toLong(), TEXT_EMBEDDING_SIZE.toLong())
+        
+        Logger.d(COMPONENT, "Creating UNet input tensors")
+        
+        // Concatenate latents for conditional and unconditional
+        val combinedLatents = latents + latents
+        val combinedEmbeddings = negativeEmbedding + promptEmbedding
+        
+        val latentTensor = TensorUtils.createInputTensor(combinedLatents, latentShape)
+        val timestepTensor = TensorUtils.createInputTensor(floatArrayOf(timestep.toFloat()), timestepShape)
+        val embeddingTensor = TensorUtils.createInputTensor(combinedEmbeddings, embeddingShape)
+        
+        Logger.d(COMPONENT, "Created UNet input tensors")
+        
+        try {
+            // Run UNet inference
+            Logger.d(COMPONENT, "Running UNet inference")
+            val inputs = mapOf(
+                "sample" to latentTensor,
+                "timestep" to timestepTensor,
+                "encoder_hidden_states" to embeddingTensor
+            )
+            
+            val result = unet!!.runInference(inputs)
+            val noisePred = result["sample"] ?: throw IllegalStateException("No output tensor found")
+            val noiseArray = TensorUtils.tensorToFloatArray(noisePred)
+            Logger.d(COMPONENT, "UNet inference completed")
+            
+            // Split predictions for unconditional and conditional
+            val splitPoint = noiseArray.size / 2
+            val uncondPred = noiseArray.sliceArray(0 until splitPoint)
+            val condPred = noiseArray.sliceArray(splitPoint until noiseArray.size)
+            
+            // Classifier-free guidance
+            Logger.d(COMPONENT, "Applying classifier-free guidance with scale: $guidanceScale")
+            val guidedPred = FloatArray(splitPoint)
+            for (i in guidedPred.indices) {
+                guidedPred[i] = uncondPred[i] + guidanceScale * (condPred[i] - uncondPred[i])
+            }
+            
+            // Scheduler step
+            Logger.d(COMPONENT, "Applying scheduler step")
+            val schedulerResult = scheduler!!.step(guidedPred, timestep, latents)
+            Logger.memory(COMPONENT)
+            
+            // Cleanup
+            latentTensor.close()
+            timestepTensor.close()
+            embeddingTensor.close()
+            result.values.forEach { it.close() }
+            
+            schedulerResult
+        } catch (e: Exception) {
+            // Cleanup in case of error
+            latentTensor.close()
+            timestepTensor.close()
+            embeddingTensor.close()
+            throw e
+        }
+    }
+
+    private suspend fun decodeLatentsToImage(latents: FloatArray, width: Int, height: Int): Bitmap = withContext(Dispatchers.Default) {
+        Logger.d(COMPONENT, "Decoding latents to image")
+        Logger.memory(COMPONENT)
+
+        // Scale latents for VAE decoder
+        val scaledLatents = latents.map { it / 0.18215f }.toFloatArray()
+        
+        // Create input tensor for VAE
+        val shape = longArrayOf(BATCH_SIZE.toLong(), LATENT_CHANNELS.toLong(), (height / 8).toLong(), (width / 8).toLong())
+        val inputTensor = TensorUtils.createInputTensor(scaledLatents, shape)
+        Logger.d(COMPONENT, "Created VAE input tensor")
+        
+        try {
+            // Run VAE decoder
+            Logger.d(COMPONENT, "Running VAE decoder inference")
+            val inputs = mapOf("latent" to inputTensor)
+            val result = vaeDecoder!!.runInference(inputs)
+            val decodedTensor = result["sample"] ?: throw IllegalStateException("No output tensor found")
+            val decodedArray = TensorUtils.tensorToFloatArray(decodedTensor)
+            Logger.d(COMPONENT, "VAE decoding completed")
+            
+            // Convert to bitmap
+            Logger.d(COMPONENT, "Converting decoded tensor to bitmap")
+            val bitmap = TensorUtils.floatArrayToBitmap(
+                decodedArray,
+                width,
+                height,
+                denormalize = true
+            )
+            Logger.memory(COMPONENT)
+            
+            // Clean up
+            inputTensor.close()
+            result.values.forEach { it.close() }
+            
+            bitmap
+        } catch (e: Exception) {
+            Logger.e(COMPONENT, "Error decoding latents", e)
+            throw e
+        }
+    }
+
+    override fun close() {
+        cleanup()
+    }
+
+    fun cleanup() {
+        try {
+            Logger.d(COMPONENT, "Cleaning up resources...")
+            textEncoder?.close()
+            textEncoder = null
+            unet?.close()
+            unet = null
+            vaeDecoder?.close()
+            vaeDecoder = null
+            scheduler = null
+            System.gc()
+            Runtime.getRuntime().gc()
+            Logger.memory(COMPONENT)
+            Logger.d(COMPONENT, "Cleanup completed successfully")
+        } catch (e: Exception) {
+            Logger.e(COMPONENT, "Error during cleanup", e)
+        }
+    }
+
+    private fun createOnnxTensor(data: FloatArray, shape: LongArray): OnnxTensor {
+        return OnnxTensor.createTensor(OrtEnvironment.getEnvironment(), FloatBuffer.wrap(data), shape)
+    }
+
+    private fun runUnetInference(
+        latentModelInput: FloatArray,
+        timestep: Long,
+        encoderHiddenStates: FloatArray
+    ): FloatArray {
+        val shape = longArrayOf(BATCH_SIZE.toLong(), LATENT_CHANNELS.toLong(), (DEFAULT_HEIGHT / 8).toLong(), (DEFAULT_WIDTH / 8).toLong())
+        val latentTensor = TensorUtils.createInputTensor(latentModelInput, shape)
+        val timestepTensor = TensorUtils.createInputTensor(floatArrayOf(timestep.toFloat()), longArrayOf(1))
+        val encoderTensor = TensorUtils.createInputTensor(encoderHiddenStates, longArrayOf(BATCH_SIZE.toLong(), 77, 768))
+
+        Logger.d(COMPONENT, "Running UNet inference")
+        val inputs = mapOf(
+            "sample" to latentTensor,
+            "timestep" to timestepTensor,
+            "encoder_hidden_states" to encoderTensor
+        )
+        
+        val result = unet!!.runInference(inputs)
+        val outputTensor = result["out_sample"] ?: throw IllegalStateException("No UNet output tensor found")
+        val output = outputTensor.floatBuffer.array()
+        
+        // Cleanup
+        latentTensor.close()
+        timestepTensor.close()
+        encoderTensor.close()
+        result.values.forEach { it.close() }
+        
+        return output
+    }
+
+    private fun runVaeInference(sample: FloatArray): FloatArray {
+        val shape = longArrayOf(BATCH_SIZE.toLong(), LATENT_CHANNELS.toLong(), (DEFAULT_HEIGHT / 8).toLong(), (DEFAULT_WIDTH / 8).toLong())
+        val inputTensor = TensorUtils.createInputTensor(sample, shape)
+        
+        Logger.d(COMPONENT, "Running VAE inference")
+        val inputs = mapOf("latent" to inputTensor)
+        val result = vaeDecoder!!.runInference(inputs)
+        val decodedTensor = result["sample"] ?: throw IllegalStateException("No VAE output tensor found")
+        val output = decodedTensor.floatBuffer.array()
+        
+        // Cleanup
+        inputTensor.close()
+        result.values.forEach { it.close() }
+        
+        return output
+    }
+
+    private fun runTextEncoderInference(inputIds: LongArray): FloatArray {
+        val shape = longArrayOf(BATCH_SIZE.toLong(), 77)
+        val inputTensor = TensorUtils.createInputTensor(inputIds.map { it.toFloat() }.toFloatArray(), shape)
+        
+        Logger.d(COMPONENT, "Running text encoder inference")
+        val inputs = mapOf("input_ids" to inputTensor)
+        val result = textEncoder!!.runInference(inputs)
+        val encodedTensor = result["last_hidden_state"] ?: throw IllegalStateException("No encoder output tensor found")
+        val output = encodedTensor.floatBuffer.array()
+        
+        // Cleanup
+        inputTensor.close()
+        result.values.forEach { it.close() }
+        
+        return output
+    }
+
+    private fun logModelInfo() {
+        session?.let { currentSession ->
+            Logger.d(COMPONENT, "Model Info:")
+            currentSession.inputInfo.forEach { (name, info) ->
+                val tensorInfo = info.info as TensorInfo
+                Logger.d(COMPONENT, "Input '$name' - Type: ${tensorInfo.type}, Shape: ${tensorInfo.shape?.contentToString()}")
+            }
+            currentSession.outputInfo.forEach { (name, info) ->
+                val tensorInfo = info.info as TensorInfo
+                Logger.d(COMPONENT, "Output '$name' - Type: ${tensorInfo.type}, Shape: ${tensorInfo.shape?.contentToString()}")
+            }
+        }
+    }
+
+    class ModelLoadException(message: String, cause: Throwable? = null) : Exception(message, cause)
+    class GenerationException(message: String, cause: Throwable? = null) : Exception(message, cause)
+} 
