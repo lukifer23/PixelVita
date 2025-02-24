@@ -78,6 +78,37 @@ target_link_libraries(
     ${log-lib}
 )
 
+# Add IntelliSense test library
+add_library(
+    intellisense_test
+    SHARED
+    intellisense_test.cpp
+)
+
+# Set properties for IntelliSense test
+set_target_properties(
+    intellisense_test
+    PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}"
+)
+
+# Include directories for IntelliSense test
+target_include_directories(
+    intellisense_test
+    PRIVATE
+    ${ANDROID_NDK}/sources/android/cpufeatures
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+# Link libraries for IntelliSense test
+target_link_libraries(
+    intellisense_test
+    PRIVATE
+    cpufeatures
+    ${log-lib}
+)
+
 # Enable NEON for ARM
 if(ANDROID_ABI MATCHES "^armeabi-v7a|arm64-v8a$")
     target_compile_options(
@@ -87,6 +118,11 @@ if(ANDROID_ABI MATCHES "^armeabi-v7a|arm64-v8a$")
     )
     target_compile_options(
         memory_manager
+        PRIVATE
+        -mfpu=neon
+    )
+    target_compile_options(
+        intellisense_test
         PRIVATE
         -mfpu=neon
     )
@@ -101,6 +137,11 @@ if(ANDROID_ABI STREQUAL "arm64-v8a")
     )
     target_compile_definitions(
         memory_manager
+        PRIVATE
+        USE_APPLE_SILICON_OPTIMIZATIONS=1
+    )
+    target_compile_definitions(
+        intellisense_test
         PRIVATE
         USE_APPLE_SILICON_OPTIMIZATIONS=1
     )

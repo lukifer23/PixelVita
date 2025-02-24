@@ -471,7 +471,7 @@ class DiffusersPipeline @Inject constructor(
         onProgress: suspend (Int) -> Unit = {}
     ): Bitmap = withContext(Dispatchers.Default) {
         try {
-            validateComponents()
+            validateAndPrepareInference()
             
             // 1. Encode text
             val promptEmbedding = encodeText(prompt)
@@ -505,6 +505,27 @@ class DiffusersPipeline @Inject constructor(
             Logger.e(COMPONENT, "Error generating image", e)
             throw GenerationException("Failed to generate image: ${e.message}", e)
         }
+    }
+
+    private fun validateAndPrepareInference() {
+        if (!isInitialized) {
+            throw IllegalStateException("Pipeline not initialized")
+        }
+
+        val memoryInfo = memoryManager.getMemoryInfo()
+        val requiredMemory = ModelConfig.MemorySettings.INFERENCE_MEMORY_MB
+
+        if (memoryInfo.freeMemoryMB < requiredMemory) {
+            Logger.w(COMPONENT, "Low memory condition detected before inference")
+            performGarbageCollection()
+            
+            val updatedMemoryInfo = memoryManager.getMemoryInfo()
+            if (updatedMemoryInfo.freeMemoryMB < requiredMemory) {
+                throw OutOfMemoryError("Insufficient memory for inference. Required: ${requiredMemory}MB, Available: ${updatedMemoryInfo.freeMemoryMB}MB")
+            }
+        }
+
+        validateComponents()
     }
 
     private fun validateComponents() {
@@ -608,24 +629,40 @@ class DiffusersPipeline @Inject constructor(
         Logger.d(COMPONENT, "Performing diffusion step at timestep: $timestep")
         Logger.memory(COMPONENT)
 
-        // Create tensors for UNet input
-        val latentShape = longArrayOf(BATCH_SIZE.toLong() * 2, LATENT_CHANNELS.toLong(), (DEFAULT_HEIGHT / 8).toLong(), (DEFAULT_WIDTH / 8).toLong())
-        val timestepShape = longArrayOf(1)
-        val embeddingShape = longArrayOf(BATCH_SIZE.toLong() * 2, MAX_TEXT_LENGTH.toLong(), TEXT_EMBEDDING_SIZE.toLong())
-        
-        Logger.d(COMPONENT, "Creating UNet input tensors")
-        
-        // Concatenate latents for conditional and unconditional
-        val combinedLatents = latents + latents
-        val combinedEmbeddings = negativeEmbedding + promptEmbedding
-        
-        val latentTensor = TensorUtils.createInputTensor(combinedLatents, latentShape)
-        val timestepTensor = TensorUtils.createInputTensor(floatArrayOf(timestep.toFloat()), timestepShape)
-        val embeddingTensor = TensorUtils.createInputTensor(combinedEmbeddings, embeddingShape)
-        
-        Logger.d(COMPONENT, "Created UNet input tensors")
-        
+        var latentTensor: OnnxTensor? = null
+        var timestepTensor: OnnxTensor? = null
+        var embeddingTensor: OnnxTensor? = null
+        var result: Map<String, OnnxTensor>? = null
+
         try {
+            // Allocate memory for tensors
+            val tensorMemory = memoryManager.allocateMemory(
+                sizeMB = ModelConfig.MemorySettings.TENSOR_MEMORY_MB,
+                type = AllocationType.TENSOR,
+                id = "tensor_diffusion_step_$timestep"
+            )
+            
+            if (tensorMemory.isFailure) {
+                throw OutOfMemoryError("Failed to allocate memory for tensors")
+            }
+
+            // Create tensors for UNet input
+            val latentShape = longArrayOf(BATCH_SIZE.toLong() * 2, LATENT_CHANNELS.toLong(), (DEFAULT_HEIGHT / 8).toLong(), (DEFAULT_WIDTH / 8).toLong())
+            val timestepShape = longArrayOf(1)
+            val embeddingShape = longArrayOf(BATCH_SIZE.toLong() * 2, MAX_TEXT_LENGTH.toLong(), TEXT_EMBEDDING_SIZE.toLong())
+            
+            Logger.d(COMPONENT, "Creating UNet input tensors")
+            
+            // Concatenate latents for conditional and unconditional
+            val combinedLatents = latents + latents
+            val combinedEmbeddings = negativeEmbedding + promptEmbedding
+            
+            latentTensor = TensorUtils.createInputTensor(combinedLatents, latentShape)
+            timestepTensor = TensorUtils.createInputTensor(floatArrayOf(timestep.toFloat()), timestepShape)
+            embeddingTensor = TensorUtils.createInputTensor(combinedEmbeddings, embeddingShape)
+            
+            Logger.d(COMPONENT, "Created UNet input tensors")
+            
             // Run UNet inference
             Logger.d(COMPONENT, "Running UNet inference")
             val inputs = mapOf(
@@ -634,7 +671,7 @@ class DiffusersPipeline @Inject constructor(
                 "encoder_hidden_states" to embeddingTensor
             )
             
-            val result = unet!!.runInference(inputs)
+            result = unet!!.runInference(inputs)
             val noisePred = result["sample"] ?: throw IllegalStateException("No output tensor found")
             val noiseArray = TensorUtils.tensorToFloatArray(noisePred)
             Logger.d(COMPONENT, "UNet inference completed")
@@ -656,19 +693,19 @@ class DiffusersPipeline @Inject constructor(
             val schedulerResult = scheduler!!.step(guidedPred, timestep, latents)
             Logger.memory(COMPONENT)
             
-            // Cleanup
-            latentTensor.close()
-            timestepTensor.close()
-            embeddingTensor.close()
-            result.values.forEach { it.close() }
+            // Free tensor memory
+            memoryManager.freeMemory("tensor_diffusion_step_$timestep")
             
             schedulerResult
         } catch (e: Exception) {
-            // Cleanup in case of error
-            latentTensor.close()
-            timestepTensor.close()
-            embeddingTensor.close()
+            Logger.e(COMPONENT, "Error in diffusion step", e)
             throw e
+        } finally {
+            // Cleanup tensors
+            latentTensor?.close()
+            timestepTensor?.close()
+            embeddingTensor?.close()
+            result?.values?.forEach { it.close() }
         }
     }
 
@@ -676,19 +713,33 @@ class DiffusersPipeline @Inject constructor(
         Logger.d(COMPONENT, "Decoding latents to image")
         Logger.memory(COMPONENT)
 
-        // Scale latents for VAE decoder
-        val scaledLatents = latents.map { it / 0.18215f }.toFloatArray()
-        
-        // Create input tensor for VAE
-        val shape = longArrayOf(BATCH_SIZE.toLong(), LATENT_CHANNELS.toLong(), (height / 8).toLong(), (width / 8).toLong())
-        val inputTensor = TensorUtils.createInputTensor(scaledLatents, shape)
-        Logger.d(COMPONENT, "Created VAE input tensor")
-        
+        var inputTensor: OnnxTensor? = null
+        var result: Map<String, OnnxTensor>? = null
+
         try {
+            // Allocate memory for VAE tensors
+            val tensorMemory = memoryManager.allocateMemory(
+                sizeMB = ModelConfig.MemorySettings.VAE_TENSOR_MEMORY_MB,
+                type = AllocationType.TENSOR,
+                id = "tensor_vae_decode"
+            )
+            
+            if (tensorMemory.isFailure) {
+                throw OutOfMemoryError("Failed to allocate memory for VAE tensors")
+            }
+
+            // Scale latents for VAE decoder
+            val scaledLatents = latents.map { it / 0.18215f }.toFloatArray()
+            
+            // Create input tensor for VAE
+            val shape = longArrayOf(BATCH_SIZE.toLong(), LATENT_CHANNELS.toLong(), (height / 8).toLong(), (width / 8).toLong())
+            inputTensor = TensorUtils.createInputTensor(scaledLatents, shape)
+            Logger.d(COMPONENT, "Created VAE input tensor")
+            
             // Run VAE decoder
             Logger.d(COMPONENT, "Running VAE decoder inference")
             val inputs = mapOf("latent" to inputTensor)
-            val result = vaeDecoder!!.runInference(inputs)
+            result = vaeDecoder!!.runInference(inputs)
             val decodedTensor = result["sample"] ?: throw IllegalStateException("No output tensor found")
             val decodedArray = TensorUtils.tensorToFloatArray(decodedTensor)
             Logger.d(COMPONENT, "VAE decoding completed")
@@ -703,14 +754,17 @@ class DiffusersPipeline @Inject constructor(
             )
             Logger.memory(COMPONENT)
             
-            // Clean up
-            inputTensor.close()
-            result.values.forEach { it.close() }
+            // Free tensor memory
+            memoryManager.freeMemory("tensor_vae_decode")
             
             bitmap
         } catch (e: Exception) {
             Logger.e(COMPONENT, "Error decoding latents", e)
             throw e
+        } finally {
+            // Cleanup tensors
+            inputTensor?.close()
+            result?.values?.forEach { it.close() }
         }
     }
 

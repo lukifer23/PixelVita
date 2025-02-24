@@ -79,6 +79,18 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        
+        <!-- IntelliSense Test Activity -->
+        <activity
+            android:name=".IntelliSenseTestActivity"
+            android:exported="true"
+            android:theme="@style/Theme.AndroidDiffusion"
+            android:label="IntelliSense Test">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
 
         <provider
             android:name="androidx.core.content.FileProvider"

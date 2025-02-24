@@ -24,6 +24,7 @@ import com.example.androiddiffusion.util.AppError
 import com.example.androiddiffusion.util.ErrorHandler
 import com.example.androiddiffusion.config.MemoryManager
 import com.example.androiddiffusion.data.state.ModelLoadingState
+import com.example.androiddiffusion.ui.components.DeveloperMenu
 
 // Material icons
 import androidx.compose.material.icons.Icons
@@ -73,6 +74,7 @@ fun MainScreen(
                     )
                 },
                 actions = {
+                    DeveloperMenu()
                     IconButton(onClick = { showSettings = true }) {
                         Icon(
                             imageVector = Icons.Default.Settings,

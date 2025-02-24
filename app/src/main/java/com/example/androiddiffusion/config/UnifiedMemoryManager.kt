@@ -11,6 +11,7 @@ import javax.inject.Singleton
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.nio.ByteBuffer
 
 @Singleton
 class UnifiedMemoryManager @Inject constructor(
@@ -113,7 +114,11 @@ class UnifiedMemoryManager @Inject constructor(
     fun freeMemory(id: String) {
         nativeMemoryAllocations.remove(id)?.let { allocation ->
             try {
-                logMemoryStatus("After freeing memory for $id")
+                // Free the native memory if it was allocated
+                if (allocation.type == AllocationType.MODEL) {
+                    freeNativeMemory(allocation.sizeMB)
+                }
+                logMemoryStatus("After freeing memory for $id (${allocation.type})")
             } catch (e: Exception) {
                 Logger.e(TAG, "Failed to free memory for $id", e)
             }
@@ -171,13 +176,37 @@ class UnifiedMemoryManager @Inject constructor(
     }
 
     private fun allocateNativeMemory(sizeMB: Long): Long {
-        // Actual native memory allocation implementation
-        // This would interface with your native code
-        return 0L // Placeholder
+        val runtime = Runtime.getRuntime()
+        val maxMemory = runtime.maxMemory() / (1024 * 1024)
+        
+        if (sizeMB > maxMemory * 0.75) {
+            throw OutOfMemoryError("Requested allocation ($sizeMB MB) exceeds safe memory limit")
+        }
+
+        try {
+            // Attempt to allocate native memory
+            val buffer = ByteBuffer.allocateDirect((sizeMB * 1024 * 1024).toInt())
+            if (buffer.capacity() > 0) {
+                return buffer.asLongBuffer().get(0)
+            }
+        } catch (e: Exception) {
+            Logger.e(TAG, "Native memory allocation failed", e)
+        }
+        
+        return 0L
     }
 
     private fun freeNativeMemory(address: Long) {
-        // Implementation for freeing native memory
+        if (address != 0L) {
+            try {
+                // Implementation would use JNI to free native memory
+                // For now, we just trigger GC to help clean up
+                System.gc()
+                Runtime.getRuntime().gc()
+            } catch (e: Exception) {
+                Logger.e(TAG, "Error freeing native memory", e)
+            }
+        }
     }
 
     private fun performMemoryMaintenance() {
@@ -283,4 +312,31 @@ class UnifiedMemoryManager @Inject constructor(
         Logger.d(TAG, "- Number of Allocations: ${nativeMemoryAllocations.size}")
         Logger.d(TAG, "Current State: ${memoryState.value}")
     }
+
+    fun getMemoryInfo(): MemoryInfo {
+        val runtime = Runtime.getRuntime()
+        val maxMemory = runtime.maxMemory() / (1024 * 1024)
+        val totalMemory = runtime.totalMemory() / (1024 * 1024)
+        val freeMemory = runtime.freeMemory() / (1024 * 1024)
+        val usedMemory = totalMemory - freeMemory
+        val nativeAllocated = getTotalAllocatedMemory()
+
+        return MemoryInfo(
+            maxMemoryMB = maxMemory,
+            totalMemoryMB = totalMemory,
+            freeMemoryMB = freeMemory,
+            usedMemoryMB = usedMemory,
+            nativeAllocatedMB = nativeAllocated,
+            memoryState = _memoryState.value
+        )
+    }
+
+    data class MemoryInfo(
+        val maxMemoryMB: Long,
+        val totalMemoryMB: Long,
+        val freeMemoryMB: Long,
+        val usedMemoryMB: Long,
+        val nativeAllocatedMB: Long,
+        val memoryState: MemoryState
+    )
 } 

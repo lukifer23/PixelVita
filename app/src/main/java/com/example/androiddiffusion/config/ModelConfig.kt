@@ -58,6 +58,31 @@ object ModelConfig {
         const val MAX_THREADS = 4
         const val THREAD_AFFINITY_ENABLED = true
         const val MEMORY_PINNING_ENABLED = true
+        
+        // Hardware acceleration settings
+        object VulkanSettings {
+            const val ENABLE_VULKAN_COMPUTE = true
+            const val VULKAN_DEVICE_CACHE = true
+            const val VULKAN_MEMORY_POOL_SIZE = 512 * 1024 * 1024 // 512MB
+            const val VULKAN_QUEUE_SIZE = 2
+        }
+        
+        object NNAPISettings {
+            const val NNAPI_ACCELERATION_MODE = 1 // NNAPI_ACCELERATION_SUSTAINED_SPEED
+            const val NNAPI_EXECUTION_PREFERENCE = 1 // NNAPI_FAST_SINGLE_ANSWER
+            const val NNAPI_ALLOW_FP16 = true
+            const val NNAPI_USE_NCHW = true
+            const val NNAPI_CPU_DISABLED = false
+            const val NNAPI_GPU_ENABLED = true
+        }
+        
+        object MemorySettings {
+            const val ENABLE_MEMORY_PATTERN = true
+            const val ENABLE_MEMORY_ARENA = true
+            const val ARENA_EXTEND_STRATEGY = 0 // kNextPowerOfTwo
+            const val MEMORY_POOL_SIZE = 1024 * 1024 * 1024 // 1GB
+            const val MEMORY_POOL_ARENA_COUNT = 2
+        }
     }
     
     // Inference settings optimized for SD 3.5 Medium
@@ -84,37 +109,37 @@ object ModelConfig {
         const val UNET_MEMORY_MB = 2048L
         const val VAE_MEMORY_MB = 512L
         const val SCHEDULER_MEMORY_MB = 128L
+        const val TENSOR_MEMORY_MB = 64L
+        const val VAE_TENSOR_MEMORY_MB = 128L
+        const val INFERENCE_MEMORY_MB = 768L // Minimum required for inference
         
         // Memory scaling factors
-        const val MEMORY_SCALE_FACTOR_LOW = 0.6f     // Increased from 0.5f
-        const val MEMORY_SCALE_FACTOR_NORMAL = 0.85f // Increased from 0.75f
+        const val MEMORY_SCALE_FACTOR_LOW = 0.6f
+        const val MEMORY_SCALE_FACTOR_NORMAL = 0.85f
         
         // Memory thresholds
-        const val MEMORY_THRESHOLD_WARNING = 0.80f    // Increased from 0.75f
-        const val MEMORY_THRESHOLD_CRITICAL = 0.90f   // Increased from 0.85f
+        const val MEMORY_THRESHOLD_WARNING = 0.80f
+        const val MEMORY_THRESHOLD_CRITICAL = 0.90f
+        const val BUFFER_MEMORY_MB = 256L
+        const val GC_THRESHOLD_MB = 2048L
+        const val MEMORY_TRIM_THRESHOLD_MB = 3072L
         
-        const val BUFFER_MEMORY_MB = 256L  // Increased from 64MB
-        
-        // GC thresholds
-        const val GC_THRESHOLD_MB = 2048L  // Increased from 1GB to 2GB
-        const val MEMORY_TRIM_THRESHOLD_MB = 3072L  // Increased from 1.5GB to 3GB
-        
-        const val TOTAL_MODEL_MEMORY_MB = TEXT_ENCODER_MEMORY_MB + 
-                                        UNET_MEMORY_MB + 
-                                        VAE_MEMORY_MB +
-                                        SCHEDULER_MEMORY_MB
+        // Total memory calculation
+        val TOTAL_MODEL_MEMORY_MB = TEXT_ENCODER_MEMORY_MB + 
+                                  UNET_MEMORY_MB + 
+                                  VAE_MEMORY_MB +
+                                  SCHEDULER_MEMORY_MB
     }
 
     object Performance {
-        const val NUM_THREADS = 4
+        const val NUM_THREADS = 2
         const val ENABLE_MEMORY_PATTERN = true
-        const val ENABLE_CPU_ARENA = true
-        const val ENABLE_SCOPED_MEMORY = true
+        const val ENABLE_PARALLEL_EXECUTION = false
     }
 
     object StorageSettings {
-        const val MIN_STORAGE_GB = 8L     // Increased from 4GB
-        const val PREFERRED_STORAGE_GB = 16L // Increased from 6GB
+        const val MIN_STORAGE_GB = 8L
+        const val PREFERRED_STORAGE_GB = 16L
     }
 }
 
