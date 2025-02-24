@@ -6,7 +6,8 @@ import ai.onnxruntime.OrtSession
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.TensorInfo
 import com.example.androiddiffusion.config.ModelConfig
-import com.example.androiddiffusion.util.NativeMemoryManager
+import com.example.androiddiffusion.config.UnifiedMemoryManager
+import com.example.androiddiffusion.config.UnifiedMemoryManager.AllocationType
 import com.example.androiddiffusion.util.Logger
 import java.io.File
 import java.io.FileOutputStream
@@ -23,7 +24,7 @@ class OnnxModel(
     private val context: Context,
     private val modelPath: String,
     private val isLowMemoryMode: Boolean = false,
-    private val nativeMemoryManager: NativeMemoryManager
+    private val memoryManager: UnifiedMemoryManager
 ) : AutoCloseable {
     companion object {
         private const val COMPONENT = "OnnxModel"
@@ -131,6 +132,7 @@ class OnnxModel(
     private val sessionLock = Object()
     private var modelBuffer: Long = 0L
     private var modelSize: Long = 0L
+    private var modelAllocationId: String? = null
 
     fun getModelBuffer(): Long = modelBuffer
 
@@ -144,7 +146,7 @@ class OnnxModel(
     private val _loadingState = MutableStateFlow<LoadingState>(LoadingState.NotLoaded)
     val loadingState: StateFlow<LoadingState> = _loadingState.asStateFlow()
 
-    private fun calculateAndAllocateMemory(modelSizeMB: Int): Long {
+    private fun calculateAndAllocateMemory(modelSizeMB: Int): Result<Long> {
         // Calculate required memory with more conservative estimates
         val workingMemoryMB = (modelSizeMB * 1.5).toInt() // Reduce from 2x to 1.5x
         val totalRequiredMB = modelSizeMB + workingMemoryMB
@@ -154,41 +156,12 @@ class OnnxModel(
         Logger.d(COMPONENT, "- Working memory: ${workingMemoryMB}MB")
         Logger.d(COMPONENT, "- Total required: ${totalRequiredMB}MB")
 
-        // Try to allocate in chunks if full allocation fails
-        val chunkSizeMB = 128 // Try allocating in 128MB chunks
-        var allocatedBuffer = 0L
-        
-        try {
-            allocatedBuffer = nativeMemoryManager.allocateBuffer(totalRequiredMB)
-            if (allocatedBuffer != 0L) {
-                Logger.d(COMPONENT, "Successfully allocated full buffer: ${totalRequiredMB}MB")
-                return allocatedBuffer
-            }
-        } catch (e: Exception) {
-            Logger.w(COMPONENT, "Failed to allocate full buffer, trying chunked allocation")
-        }
-
-        // If full allocation failed, try chunked allocation
-        var remainingMB = totalRequiredMB
-        while (remainingMB > 0 && allocatedBuffer == 0L) {
-            val currentChunkSize = minOf(chunkSizeMB, remainingMB)
-            try {
-                allocatedBuffer = nativeMemoryManager.allocateBuffer(currentChunkSize)
-                if (allocatedBuffer != 0L) {
-                    Logger.d(COMPONENT, "Successfully allocated chunk: ${currentChunkSize}MB")
-                    break
-                }
-            } catch (e: Exception) {
-                Logger.w(COMPONENT, "Failed to allocate ${currentChunkSize}MB chunk")
-            }
-            remainingMB -= chunkSizeMB
-        }
-
-        if (allocatedBuffer == 0L) {
-            throw OutOfMemoryError("Failed to allocate memory after multiple attempts. Required: ${totalRequiredMB}MB")
-        }
-
-        return allocatedBuffer
+        modelAllocationId = "onnx_model_${System.currentTimeMillis()}"
+        return memoryManager.allocateMemory(
+            sizeMB = totalRequiredMB.toLong(),
+            type = AllocationType.MODEL,
+            id = modelAllocationId!!
+        )
     }
 
     suspend fun loadModel(onProgress: (String, Int) -> Unit = { _, _ -> }) {
@@ -225,16 +198,9 @@ class OnnxModel(
             onProgress("memory", 20)
             val modelSizeMB = (modelSize / (1024 * 1024)).toInt()
             
-            modelBuffer = calculateAndAllocateMemory(modelSizeMB)
-            if (modelBuffer == 0L) {
-                throw OutOfMemoryError("Failed to allocate native memory for model: ${modelSizeMB}MB")
-            }
-
-            // Lock memory
-            _loadingState.value = LoadingState.Loading(40, "Locking memory")
-            onProgress("lock", 40)
-            if (!nativeMemoryManager.lockBuffer(modelBuffer)) {
-                throw IllegalStateException("Failed to lock memory buffer")
+            val memoryResult = calculateAndAllocateMemory(modelSizeMB)
+            if (memoryResult.isFailure) {
+                throw OutOfMemoryError("Failed to allocate memory for model: ${modelSizeMB}MB")
             }
 
             // Initialize session
@@ -417,9 +383,9 @@ class OnnxModel(
             try {
                 session?.close()
                 session = null
-                if (modelBuffer != 0L) {
-                    nativeMemoryManager.freeBuffer(modelBuffer)
-                    modelBuffer = 0L
+                modelAllocationId?.let { id ->
+                    memoryManager.freeMemory(id)
+                    modelAllocationId = null
                 }
                 isInitialized = false
                 Logger.d(COMPONENT, "Session cleaned up")
@@ -442,7 +408,7 @@ class OnnxModel(
         Logger.d(COMPONENT, "- Free Memory: ${freeMemory}MB")
         Logger.d(COMPONENT, "- Used Memory: ${usedMemory}MB")
         Logger.d(COMPONENT, "- Usage: ${(usedMemory.toFloat() / maxMemory.toFloat() * 100).toInt()}%")
-        Logger.d(COMPONENT, "- Native Memory Available: ${nativeMemoryManager.getAvailableMemoryMB()}MB")
+        Logger.d(COMPONENT, "- Native Memory Available: ${memoryManager.getAvailableMemoryMB()}MB")
     }
 
     private fun performGarbageCollection() {

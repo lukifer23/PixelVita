@@ -39,13 +39,14 @@ import kotlin.math.sqrt
 
 // App-specific imports
 import com.example.androiddiffusion.ml.diffusers.schedulers.DDIMScheduler
+import com.example.androiddiffusion.config.UnifiedMemoryManager
+import com.example.androiddiffusion.config.UnifiedMemoryManager.AllocationType
 
 @Singleton
 class DiffusersPipeline @Inject constructor(
     @ApplicationContext private val context: Context,
+    private val memoryManager: UnifiedMemoryManager,
     private val tokenizer: TextTokenizer,
-    private val memoryManager: MemoryManager,
-    private val nativeMemoryManager: NativeMemoryManager,
     private val onProgressUpdate: (Float) -> Unit = {}
 ) : AutoCloseable {
     companion object {
@@ -104,7 +105,13 @@ class DiffusersPipeline @Inject constructor(
     }
 
     private fun checkMemoryForComponent(requiredMemoryMB: Long, componentName: String) {
-        if (!memoryManager.ensureMemoryAvailable(requiredMemoryMB)) {
+        val result = memoryManager.allocateMemory(
+            sizeMB = requiredMemoryMB,
+            type = AllocationType.MODEL,
+            id = "model_$componentName"
+        )
+        
+        if (result.isFailure) {
             throw OutOfMemoryError("Not enough memory to load $componentName. Required: ${requiredMemoryMB}MB")
         }
     }
@@ -132,26 +139,30 @@ class DiffusersPipeline @Inject constructor(
     }
 
     private fun getAvailableMemory(): Long {
+        return memoryManager.getAvailableMemoryMB() * 1024 * 1024
+    }
+
+    private fun getMemoryUsage(): Float {
         val runtime = Runtime.getRuntime()
-        val maxMemory = runtime.maxMemory()
-        val totalMemory = runtime.totalMemory()
-        val freeMemory = runtime.freeMemory()
-        val availableMemory = maxMemory - (totalMemory - freeMemory)
-        
-        Logger.d(COMPONENT, "Memory Stats - Max: ${maxMemory/(1024*1024)}MB, " +
-                          "Total: ${totalMemory/(1024*1024)}MB, " +
-                          "Free: ${freeMemory/(1024*1024)}MB, " +
-                          "Available: ${availableMemory/(1024*1024)}MB")
-        return availableMemory
+        val usedMemory = runtime.totalMemory() - runtime.freeMemory()
+        return usedMemory.toFloat() / runtime.maxMemory()
     }
 
     private fun ensureMemoryAvailable(requiredMemoryMB: Long) {
-        if (!memoryManager.ensureMemoryAvailable(requiredMemoryMB)) {
-            val availableMemory = memoryManager.getAvailableMemory()
+        val result = memoryManager.allocateMemory(
+            sizeMB = requiredMemoryMB,
+            type = AllocationType.MODEL,
+            id = "temp_check_${System.currentTimeMillis()}"
+        )
+        
+        if (result.isFailure) {
             throw OutOfMemoryError(
-                "Insufficient memory for operation. Available: ${availableMemory}MB, Required: ${requiredMemoryMB}MB"
+                "Insufficient memory for operation. Required: ${requiredMemoryMB}MB"
             )
         }
+        
+        // Free the temporary allocation
+        memoryManager.freeMemory("temp_check_${System.currentTimeMillis()}")
     }
 
     private fun checkMemoryAndCleanup() {
@@ -232,13 +243,18 @@ class DiffusersPipeline @Inject constructor(
 
             // Force cleanup and GC before starting
             cleanup()
-            performGarbageCollection()
             onProgress("cleanup", 5)
             
             // Verify available memory
             val requiredMemory = ModelConfig.MemorySettings.TOTAL_MODEL_MEMORY_MB
-            if (!memoryManager.ensureMemoryAvailable(requiredMemory)) {
-                throw OutOfMemoryError("Insufficient memory to load models. Required: ${requiredMemory}MB, Available: ${memoryManager.getAvailableMemory()}MB")
+            val memoryResult = memoryManager.allocateMemory(
+                sizeMB = requiredMemory,
+                type = AllocationType.MODEL,
+                id = "model_total"
+            )
+            
+            if (memoryResult.isFailure) {
+                throw OutOfMemoryError("Insufficient memory to load models. Required: ${requiredMemory}MB")
             }
             onProgress("memory_check", 10)
 
@@ -269,45 +285,84 @@ class DiffusersPipeline @Inject constructor(
                 Logger.d(COMPONENT, "Scheduler initialized successfully")
                 onProgress("scheduler", 20)
                 logMemoryState("After scheduler initialization")
-                performGarbageCollection()
 
                 // Step 2: Load text encoder
                 Logger.d(COMPONENT, "=== Phase 2: Text Encoder Loading ===")
-                if (!memoryManager.ensureMemoryAvailable(ModelConfig.MemorySettings.TEXT_ENCODER_MEMORY_MB)) {
+                val textEncoderMemory = ModelConfig.MemorySettings.TEXT_ENCODER_MEMORY_MB
+                val textEncoderResult = memoryManager.allocateMemory(
+                    sizeMB = textEncoderMemory,
+                    type = AllocationType.MODEL,
+                    id = "model_text_encoder"
+                )
+                
+                if (textEncoderResult.isFailure) {
                     throw OutOfMemoryError("Insufficient memory for text encoder")
                 }
+                
                 onProgress("text_encoder_init", 25)
-                textEncoder = OnnxModel(context, "$modelPath/text_encoder.onnx", true, nativeMemoryManager)
+                textEncoder = OnnxModel(
+                    context = context,
+                    modelPath = "$modelPath/text_encoder.onnx",
+                    isLowMemoryMode = memoryManager.memoryState.value is UnifiedMemoryManager.MemoryState.Low,
+                    memoryManager = memoryManager
+                )
+                
                 textEncoder?.loadModel { stage, progress -> 
                     onProgress("text_encoder_$stage", 25 + (progress * 0.15).toInt())
                 }
                 onProgress("text_encoder_verify", 40)
                 Logger.d(COMPONENT, "Text encoder loaded successfully")
                 logMemoryState("After text encoder loading")
-                performGarbageCollection()
 
                 // Step 3: Load UNet
                 Logger.d(COMPONENT, "=== Phase 3: UNet Loading ===")
-                if (!memoryManager.ensureMemoryAvailable(ModelConfig.MemorySettings.UNET_MEMORY_MB)) {
+                val unetMemory = ModelConfig.MemorySettings.UNET_MEMORY_MB
+                val unetResult = memoryManager.allocateMemory(
+                    sizeMB = unetMemory,
+                    type = AllocationType.MODEL,
+                    id = "model_unet"
+                )
+                
+                if (unetResult.isFailure) {
                     throw OutOfMemoryError("Insufficient memory for UNet")
                 }
+                
                 onProgress("unet_init", 45)
-                unet = OnnxModel(context, "$modelPath/unet.onnx", true, nativeMemoryManager)
+                unet = OnnxModel(
+                    context = context,
+                    modelPath = "$modelPath/unet.onnx",
+                    isLowMemoryMode = memoryManager.memoryState.value is UnifiedMemoryManager.MemoryState.Low,
+                    memoryManager = memoryManager
+                )
+                
                 unet?.loadModel { stage, progress ->
                     onProgress("unet_$stage", 45 + (progress * 0.25).toInt())
                 }
                 onProgress("unet_verify", 70)
                 Logger.d(COMPONENT, "UNet loaded successfully")
                 logMemoryState("After UNet loading")
-                performGarbageCollection()
 
                 // Step 4: Load VAE
                 Logger.d(COMPONENT, "=== Phase 4: VAE Loading ===")
-                if (!memoryManager.ensureMemoryAvailable(ModelConfig.MemorySettings.VAE_MEMORY_MB)) {
+                val vaeMemory = ModelConfig.MemorySettings.VAE_MEMORY_MB
+                val vaeResult = memoryManager.allocateMemory(
+                    sizeMB = vaeMemory,
+                    type = AllocationType.MODEL,
+                    id = "model_vae"
+                )
+                
+                if (vaeResult.isFailure) {
                     throw OutOfMemoryError("Insufficient memory for VAE")
                 }
+                
                 onProgress("vae_init", 75)
-                vaeDecoder = OnnxModel(context, "$modelPath/vae_decoder.onnx", true, nativeMemoryManager)
+                vaeDecoder = OnnxModel(
+                    context = context,
+                    modelPath = "$modelPath/vae_decoder.onnx",
+                    isLowMemoryMode = memoryManager.memoryState.value is UnifiedMemoryManager.MemoryState.Low,
+                    memoryManager = memoryManager
+                )
+                
                 vaeDecoder?.loadModel { stage, progress ->
                     onProgress("vae_$stage", 75 + (progress * 0.20).toInt())
                 }
@@ -333,29 +388,23 @@ class DiffusersPipeline @Inject constructor(
 
     private fun logInitialMemoryState() {
         Logger.d(COMPONENT, "Initial Memory Status:")
-        Logger.d(COMPONENT, "Available Memory: ${memoryManager.getAvailableMemory()}MB")
-        Logger.d(COMPONENT, "Total Memory: ${memoryManager.getTotalMemory()}MB")
-        Logger.d(COMPONENT, "Effective Limit: ${memoryManager.getEffectiveMemoryLimit()}MB")
-        Logger.d(COMPONENT, "Native Memory Available: ${nativeMemoryManager.getAvailableMemoryMB()}MB")
+        Logger.d(COMPONENT, "Available Memory: ${memoryManager.getAvailableMemoryMB()}MB")
+        Logger.d(COMPONENT, "Total Memory: ${memoryManager.getTotalMemoryMB()}MB")
         Logger.d(COMPONENT, "Low Memory Mode: $isLowMemoryMode")
     }
 
     private fun logMemoryState(phase: String) {
         Logger.d(COMPONENT, "Memory Status - $phase:")
         Logger.d(COMPONENT, "Java Heap - Available: ${getAvailableMemory() / (1024 * 1024)}MB")
-        Logger.d(COMPONENT, "Native Memory - Available: ${nativeMemoryManager.getAvailableMemoryMB()}MB")
         Logger.d(COMPONENT, "Memory Usage: ${(getMemoryUsage() * 100).toInt()}%")
     }
 
     private fun logFinalMemoryState() {
         Logger.d(COMPONENT, "Final Memory Status:")
         Logger.d(COMPONENT, "System Memory:")
-        Logger.d(COMPONENT, "- Available Memory: ${memoryManager.getAvailableMemory()}MB")
-        Logger.d(COMPONENT, "- Total Memory: ${memoryManager.getTotalMemory()}MB")
+        Logger.d(COMPONENT, "- Available Memory: ${memoryManager.getAvailableMemoryMB()}MB")
+        Logger.d(COMPONENT, "- Total Memory: ${memoryManager.getTotalMemoryMB()}MB")
         Logger.d(COMPONENT, "- Memory Usage: ${(getMemoryUsage() * 100).toInt()}%")
-        
-        Logger.d(COMPONENT, "Native Memory:")
-        Logger.d(COMPONENT, "- Available: ${nativeMemoryManager.getAvailableMemoryMB()}MB")
         
         Logger.d(COMPONENT, "Component Status:")
         val componentStatus = getLoadedComponents()
@@ -363,17 +412,6 @@ class DiffusersPipeline @Inject constructor(
         Logger.d(COMPONENT, "- UNet: ${componentStatus.unet}")
         Logger.d(COMPONENT, "- VAE: ${componentStatus.vae}")
         Logger.d(COMPONENT, "- Scheduler: ${componentStatus.scheduler}")
-        
-        Logger.d(COMPONENT, "Component Memory Usage:")
-        textEncoder?.let { encoder ->
-            Logger.d(COMPONENT, "- Text Encoder Buffer: ${if (encoder.getModelBuffer() != 0L) "Allocated" else "Not Allocated"}")
-        }
-        unet?.let { unetModel ->
-            Logger.d(COMPONENT, "- UNet Buffer: ${if (unetModel.getModelBuffer() != 0L) "Allocated" else "Not Allocated"}")
-        }
-        vaeDecoder?.let { vae ->
-            Logger.d(COMPONENT, "- VAE Buffer: ${if (vae.getModelBuffer() != 0L) "Allocated" else "Not Allocated"}")
-        }
         
         Logger.d(COMPONENT, "Pipeline State:")
         Logger.d(COMPONENT, "- Initialization Status: $isInitialized")
@@ -403,12 +441,6 @@ class DiffusersPipeline @Inject constructor(
         )
     }
 
-    private fun getMemoryUsage(): Float {
-        val runtime = Runtime.getRuntime()
-        val usedMemory = runtime.totalMemory() - runtime.freeMemory()
-        return usedMemory.toFloat() / runtime.maxMemory()
-    }
-
     private fun performGarbageCollection() {
         Logger.d(COMPONENT, "Initiating garbage collection...")
         Logger.d(COMPONENT, "Pre-GC Memory State:")
@@ -423,39 +455,8 @@ class DiffusersPipeline @Inject constructor(
         Logger.d(COMPONENT, "Garbage collection completed")
     }
 
-    private fun allocateComponentMemory(component: String, requiredMemoryMB: Long): Long {
-        Logger.d(COMPONENT, "Attempting to allocate ${requiredMemoryMB}MB for $component")
-        
-        // Try native memory allocation
-        val buffer = ByteBuffer.allocateDirect(requiredMemoryMB.toInt())
-        buffer.order(ByteOrder.nativeOrder())
-        if (buffer.capacity() > 0) {
-            val nativeAddress = buffer.asLongBuffer().get(0)
-            if (nativeMemoryManager.lockBuffer(nativeAddress)) {
-                Logger.d(COMPONENT, "Successfully allocated native memory for $component")
-                return nativeAddress
-            }
-            nativeMemoryManager.freeBuffer(nativeAddress)
-        }
-
-        // Fall back to Java heap
-        Logger.d(COMPONENT, "Falling back to Java heap for $component")
-        if (!memoryManager.ensureMemoryAvailable(requiredMemoryMB)) {
-            throw OutOfMemoryError("Failed to allocate memory for $component. Required: ${requiredMemoryMB}MB")
-        }
-        return 0L // Indicates using Java heap
-    }
-
-    private fun releaseComponentMemory(component: String, buffer: Long) {
-        if (buffer != 0L) {
-            try {
-                nativeMemoryManager.unlockBuffer(buffer)
-                nativeMemoryManager.freeBuffer(buffer)
-                Logger.d(COMPONENT, "Released native memory for $component")
-            } catch (e: Exception) {
-                Logger.e(COMPONENT, "Error releasing native memory for $component", e)
-            }
-        }
+    private fun releaseComponentMemory(component: String) {
+        memoryManager.freeMemory("component_$component")
         performGarbageCollection()
     }
 
@@ -727,8 +728,13 @@ class DiffusersPipeline @Inject constructor(
             vaeDecoder?.close()
             vaeDecoder = null
             scheduler = null
-            System.gc()
-            Runtime.getRuntime().gc()
+            
+            // Free all model memory
+            memoryManager.freeMemory("model_total")
+            memoryManager.freeMemory("model_text_encoder")
+            memoryManager.freeMemory("model_unet")
+            memoryManager.freeMemory("model_vae")
+            
             Logger.memory(COMPONENT)
             Logger.d(COMPONENT, "Cleanup completed successfully")
         } catch (e: Exception) {
