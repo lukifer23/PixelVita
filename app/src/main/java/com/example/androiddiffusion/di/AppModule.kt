@@ -7,7 +7,7 @@ import com.example.androiddiffusion.data.AppDatabase
 import com.example.androiddiffusion.data.dao.DiffusionModelDao
 import com.example.androiddiffusion.data.ModelRepository
 import com.example.androiddiffusion.data.manager.ModelDownloadManager
-import com.example.androiddiffusion.config.UnifiedMemoryManager
+import com.example.androiddiffusion.config.MemoryManager
 import com.example.androiddiffusion.ml.diffusers.DiffusersPipeline
 import com.example.androiddiffusion.ml.diffusers.TextTokenizer
 import com.example.androiddiffusion.util.ImageManager
@@ -39,10 +39,10 @@ object AppModule {
     
     @Provides
     @Singleton
-    fun provideUnifiedMemoryManager(
+    fun provideMemoryManager(
         @ApplicationContext context: Context
-    ): UnifiedMemoryManager {
-        return UnifiedMemoryManager(context)
+    ): MemoryManager {
+        return MemoryManager(context)
     }
     
     @Provides
@@ -57,12 +57,12 @@ object AppModule {
     @Singleton
     fun provideDiffusersPipeline(
         @ApplicationContext context: Context,
-        unifiedMemoryManager: UnifiedMemoryManager,
+        memoryManager: MemoryManager,
         tokenizer: TextTokenizer
     ): DiffusersPipeline {
         return DiffusersPipeline(
             context = context,
-            memoryManager = unifiedMemoryManager,
+            memoryManager = memoryManager,
             tokenizer = tokenizer
         )
     }
@@ -132,4 +132,4 @@ object AppModule {
     ): ImageManager {
         return ImageManager(context)
     }
-} 
+}

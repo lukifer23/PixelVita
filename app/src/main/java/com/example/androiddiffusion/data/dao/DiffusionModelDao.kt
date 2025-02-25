@@ -20,4 +20,4 @@ interface DiffusionModelDao {
 
     @Delete
     suspend fun deleteModel(model: DiffusionModel)
-} 
+}
