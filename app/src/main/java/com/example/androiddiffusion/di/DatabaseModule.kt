@@ -6,7 +6,7 @@ import androidx.room.RoomDatabase
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.androiddiffusion.data.DiffusionModel
 import com.example.androiddiffusion.data.ModelType
-import com.example.androiddiffusion.data.dao.ModelDao
+import com.example.androiddiffusion.data.dao.DiffusionModelDao
 import com.example.androiddiffusion.data.db.AppDatabase
 import com.example.androiddiffusion.config.ModelConfig
 import com.example.androiddiffusion.util.Logger
@@ -71,7 +71,7 @@ object DatabaseModule {
                         try {
                             withContext(Dispatchers.IO) {
                                 val database = provideAppDatabase(context)
-                                val modelDao = database.modelDao()
+                                val modelDao = database.diffusionModelDao()
                                 val models = modelDao.getAllModels()
                                 Logger.d(TAG, "Found ${models.size} models in database")
                                 if (models.isEmpty()) {
@@ -98,8 +98,8 @@ object DatabaseModule {
 
     @Provides
     @Singleton
-    fun provideModelDao(database: AppDatabase): ModelDao {
-        return database.modelDao()
+    fun provideDiffusionModelDao(database: AppDatabase): DiffusionModelDao {
+        return database.diffusionModelDao()
     }
 
     private suspend fun initializeDefaultModel(context: Context, database: AppDatabase) {
@@ -182,7 +182,7 @@ object DatabaseModule {
                 )
 
                 // Update database
-                val modelDao = database.modelDao()
+                val modelDao = database.diffusionModelDao()
                 val existingModel = modelDao.getModelById(defaultModel.id)
                 if (existingModel == null) {
                     Logger.d(TAG, "Inserting new model entry")
@@ -203,4 +203,4 @@ object DatabaseModule {
             }
         }
     }
-} 
+}
