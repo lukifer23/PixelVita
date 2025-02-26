@@ -339,4 +339,4 @@ class UnifiedMemoryManager @Inject constructor(
         val nativeAllocatedMB: Long,
         val memoryState: MemoryState
     )
-} 
+}

@@ -43,6 +43,34 @@ object NativeOptimizations {
         }
     }
 
+    fun enableHardwareAcceleration() {
+        if (!isInitialized) {
+            Log.w(TAG, "Native library not initialized")
+            return
+        }
+        try {
+            enableHardwareAccelerationNative()
+            Log.d(TAG, "Hardware acceleration enabled")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to enable hardware acceleration: ${e.message}")
+        }
+    }
+
+    fun logDebugInfo() {
+        if (!isInitialized) {
+            Log.w(TAG, "Native library not initialized")
+            return
+        }
+        try {
+            val debugInfo = getDebugInfoNative()
+            Log.d(TAG, "Debug Info: $debugInfo")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to retrieve debug info: ${e.message}")
+        }
+    }
+
     private external fun isDeviceSupported(): Boolean
     private external fun getOptimalNumThreadsNative(): Int
-} 
+    private external fun enableHardwareAccelerationNative()
+    private external fun getDebugInfoNative(): String
+}

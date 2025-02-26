@@ -1,6 +1,8 @@
 #include "include/native_optimizations.h"
 #include <cpu-features.h>
 #include <thread>
+#include <GLES3/gl3.h>
+#include <android/NeuralNetworks.h>
 
 #define LOG_TAG "NativeOptimizations"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -58,4 +60,24 @@ Java_com_example_androiddiffusion_ml_NativeOptimizations_getOptimalNumThreadsNat
     return optimalThreads;
 }
 
-} // extern "C" 
+JNIEXPORT void JNICALL
+Java_com_example_androiddiffusion_ml_NativeOptimizations_enableHardwareAcceleration(
+        JNIEnv *env,
+        jobject /* this */) {
+    // Enable OpenGL ES 3.0
+    if (gl3wInit() != 0) {
+        LOGE("Failed to initialize OpenGL ES 3.0");
+        return;
+    }
+    LOGI("OpenGL ES 3.0 initialized successfully");
+
+    // Enable NNAPI
+    ANeuralNetworksDevice* device;
+    if (ANeuralNetworks_getDevice(0, &device) != ANEURALNETWORKS_NO_ERROR) {
+        LOGE("Failed to get NNAPI device");
+        return;
+    }
+    LOGI("NNAPI device obtained successfully");
+}
+
+} // extern "C"

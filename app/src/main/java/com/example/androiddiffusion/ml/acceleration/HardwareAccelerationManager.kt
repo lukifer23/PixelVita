@@ -21,6 +21,7 @@ class HardwareAccelerationManager @Inject constructor(
 
     private var vulkanAvailable: Boolean = false
     private var nnapiAvailable: Boolean = false
+    private var npuAvailable: Boolean = false
 
     init {
         checkAvailableAccelerators()
@@ -40,8 +41,9 @@ class HardwareAccelerationManager @Inject constructor(
             
             vulkanAvailable = providers.contains("VulkanExecutionProvider")
             nnapiAvailable = providers.contains("NnapiExecutionProvider")
+            npuAvailable = providers.contains("NpuExecutionProvider")
 
-            Logger.i(TAG, "Hardware acceleration availability: Vulkan=$vulkanAvailable, NNAPI=$nnapiAvailable")
+            Logger.i(TAG, "Hardware acceleration availability: Vulkan=$vulkanAvailable, NNAPI=$nnapiAvailable, NPU=$npuAvailable")
         } catch (e: Exception) {
             Logger.e(TAG, "Error initializing hardware acceleration", e)
         }
@@ -100,6 +102,22 @@ class HardwareAccelerationManager @Inject constructor(
                 }
             }
 
+            // Add NPU provider if available and enabled
+            if (npuAvailable && ModelConfig.OptimizationSettings.USE_NPU) {
+                with(ModelConfig.OptimizationSettings.NPUSettings) {
+                    val npuProviderOptions = mapOf(
+                        "NPU_ACCELERATION_MODE" to NPU_ACCELERATION_MODE.toString(),
+                        "NPU_EXECUTION_PREFERENCE" to NPU_EXECUTION_PREFERENCE.toString(),
+                        "NPU_ALLOW_FP16" to NPU_ALLOW_FP16.toString(),
+                        "NPU_USE_NCHW" to NPU_USE_NCHW.toString(),
+                        "NPU_CPU_DISABLED" to NPU_CPU_DISABLED.toString(),
+                        "NPU_GPU_ENABLED" to NPU_GPU_ENABLED.toString()
+                    )
+                    options.addConfigEntry("session.npu", npuProviderOptions.toString())
+                    Logger.i(TAG, "NPU provider configured")
+                }
+            }
+
             Logger.i(TAG, "Session options configured successfully")
         } catch (e: Exception) {
             Logger.e(TAG, "Error configuring session options", e)
@@ -109,4 +127,5 @@ class HardwareAccelerationManager @Inject constructor(
 
     fun isVulkanAvailable() = vulkanAvailable
     fun isNNAPIAvailable() = nnapiAvailable
-} 
+    fun isNPUAvailable() = npuAvailable
+}

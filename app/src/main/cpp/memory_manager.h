@@ -30,6 +30,10 @@ public:
     void initializeMemoryPool(size_t poolSize);
     void resizeMemoryPool(size_t newSize);
     
+    // New functions for memory optimization
+    void optimizeMemoryUsage();
+    void logMemoryUsage() const;
+    
 private:
     MemoryManager();
     ~MemoryManager();
@@ -76,6 +80,12 @@ extern "C" {
         
     JNIEXPORT jfloat JNICALL Java_com_example_androiddiffusion_util_NativeMemoryManager_getFragmentationRatio(
         JNIEnv* env, jobject obj);
+    
+    JNIEXPORT void JNICALL Java_com_example_androiddiffusion_util_NativeMemoryManager_optimizeMemoryUsage(
+        JNIEnv* env, jobject obj);
+    
+    JNIEXPORT void JNICALL Java_com_example_androiddiffusion_util_NativeMemoryManager_logMemoryUsage(
+        JNIEnv* env, jobject obj);
 }
 
-#endif // MEMORY_MANAGER_H 
+#endif // MEMORY_MANAGER_H
