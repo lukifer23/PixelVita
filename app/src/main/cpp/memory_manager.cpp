@@ -8,6 +8,7 @@
 #include <malloc.h>
 #include <algorithm>
 #include <cstring>
+#include <chrono>
 
 #define LOG_TAG "NativeMemoryManager"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -53,6 +54,7 @@ void MemoryManager::initializeMemoryPool(size_t poolSize) {
 }
 
 void* MemoryManager::allocateMemory(size_t size, const std::string& tag) {
+    auto start = std::chrono::high_resolution_clock::now();
     std::lock_guard<std::mutex> lock(mutex);
     
     if (!memoryPool) {
@@ -81,11 +83,14 @@ void* MemoryManager::allocateMemory(size_t size, const std::string& tag) {
     existingBlock.tag = tag;
     totalAllocated += size;
     
-    LOGI("Allocated %zu bytes with tag '%s'", size, tag.c_str());
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = end - start;
+    LOGI("Allocated %zu bytes with tag '%s' in %f seconds", size, tag.c_str(), elapsed.count());
     return block;
 }
 
 bool MemoryManager::freeMemory(void* ptr) {
+    auto start = std::chrono::high_resolution_clock::now();
     std::lock_guard<std::mutex> lock(mutex);
     
     auto it = memoryBlocks.find(ptr);
@@ -98,11 +103,14 @@ bool MemoryManager::freeMemory(void* ptr) {
     totalAllocated -= it->second.size;
     
     mergeFreeBlocks();
-    LOGI("Freed memory block of size %zu", it->second.size);
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = end - start;
+    LOGI("Freed memory block of size %zu in %f seconds", it->second.size, elapsed.count());
     return true;
 }
 
 void MemoryManager::freeAllMemory() {
+    auto start = std::chrono::high_resolution_clock::now();
     std::lock_guard<std::mutex> lock(mutex);
     
     if (memoryPool) {
@@ -114,7 +122,9 @@ void MemoryManager::freeAllMemory() {
     totalAllocated = 0;
     totalPoolSize = 0;
     
-    LOGI("All memory freed");
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = end - start;
+    LOGI("All memory freed in %f seconds", elapsed.count());
 }
 
 void* MemoryManager::findFreeBlock(size_t size) {
@@ -210,4 +220,4 @@ extern "C" {
             JNIEnv* env, jobject obj) {
         return MemoryManager::getInstance().getFragmentationRatio();
     }
-} 
+}

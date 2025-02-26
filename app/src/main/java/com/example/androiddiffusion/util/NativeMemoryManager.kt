@@ -47,29 +47,37 @@ class NativeMemoryManager @Inject constructor(
         if (ptr == 0L) {
             throw OutOfMemoryError("Failed to allocate $size bytes")
         }
+        Log.d(TAG, "Allocated $size bytes with tag '$tag'")
         return ptr
     }
     
     fun freeMemory(ptr: Long): Boolean {
         require(isInitialized) { "Memory manager not initialized" }
-        return freeMemoryNative(ptr)
+        val result = freeMemoryNative(ptr)
+        Log.d(TAG, "Freed memory at pointer $ptr: $result")
+        return result
     }
     
     fun freeAllMemory() {
         if (isInitialized) {
             freeAllMemoryNative()
             isInitialized = false
+            Log.d(TAG, "Freed all memory")
         }
     }
     
     fun getTotalAllocated(): Long {
         require(isInitialized) { "Memory manager not initialized" }
-        return getTotalAllocatedNative()
+        val totalAllocated = getTotalAllocatedNative()
+        Log.d(TAG, "Total allocated memory: $totalAllocated bytes")
+        return totalAllocated
     }
     
     fun getAvailableMemory(): Long {
         require(isInitialized) { "Memory manager not initialized" }
-        return getAvailableMemoryNative()
+        val availableMemory = getAvailableMemoryNative()
+        Log.d(TAG, "Available memory: $availableMemory bytes")
+        return availableMemory
     }
     
     fun getAvailableMemoryMB(): Long {
@@ -79,11 +87,14 @@ class NativeMemoryManager @Inject constructor(
     fun defragmentMemory() {
         require(isInitialized) { "Memory manager not initialized" }
         defragmentMemoryNative()
+        Log.d(TAG, "Memory defragmented")
     }
     
     fun getFragmentationRatio(): Float {
         require(isInitialized) { "Memory manager not initialized" }
-        return getFragmentationRatioNative()
+        val fragmentationRatio = getFragmentationRatioNative()
+        Log.d(TAG, "Fragmentation ratio: $fragmentationRatio")
+        return fragmentationRatio
     }
     
     fun getMemoryStats(): MemoryStats {
@@ -110,4 +121,4 @@ class NativeMemoryManager @Inject constructor(
     private external fun getAvailableMemoryNative(): Long
     private external fun defragmentMemoryNative()
     private external fun getFragmentationRatioNative(): Float
-} 
+}

@@ -100,6 +100,9 @@ class GenerateViewModel @Inject constructor(
                 val errorMessage = e.message ?: "Unknown error occurred"
                 _error.value = AppError.GenerationError(errorMessage)
                 _generationState.value = GenerationState.Error(errorMessage)
+                Logger.e("GenerateViewModel", "Error generating image", e)
+            } finally {
+                Logger.d("GenerateViewModel", "Image generation process completed")
             }
         }
     }
@@ -123,6 +126,9 @@ class GenerateViewModel @Inject constructor(
                 }
             } catch (e: Exception) {
                 _error.value = AppError.SaveError(e.message ?: "Unknown error while saving")
+                Logger.e("GenerateViewModel", "Error saving image", e)
+            } finally {
+                Logger.d("GenerateViewModel", "Image save process completed")
             }
         }
     }
@@ -140,6 +146,7 @@ class GenerateViewModel @Inject constructor(
         
         imageSaver.shareImage(uri)
         _successMessage.value = "Image shared successfully"
+        Logger.d("GenerateViewModel", "Image shared successfully")
     }
 
     fun onPermissionResult(granted: Boolean) {
@@ -153,6 +160,7 @@ class GenerateViewModel @Inject constructor(
             }
         } else {
             _error.value = AppError.StorageError("Storage permission denied")
+            Logger.w("GenerateViewModel", "Storage permission denied")
         }
     }
 
@@ -176,6 +184,7 @@ class GenerateViewModel @Inject constructor(
     private fun onImageGenerationComplete() {
         _successMessage.value = "Image generated successfully"
         notificationManager.showGenerationCompleteNotification()
+        Logger.d("GenerateViewModel", "Image generation completed successfully")
     }
 
     private fun onImageSaved() {
@@ -183,6 +192,7 @@ class GenerateViewModel @Inject constructor(
         _savedImageUri.value?.let { uri ->
             notificationManager.showImageSavedNotification(uri)
         }
+        Logger.d("GenerateViewModel", "Image saved successfully")
     }
 
     fun resetState() {
