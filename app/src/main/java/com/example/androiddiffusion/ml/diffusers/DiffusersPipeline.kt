@@ -28,6 +28,8 @@ import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 // Java/Kotlin standard library
 import java.io.File
@@ -76,6 +78,7 @@ class DiffusersPipeline @Inject constructor(
     private var sessionOptions: OrtSession.SessionOptions? = null
     private var currentModel: DiffusionModel? = null
     private var lastError: Exception? = null
+    private val generationMutex = Mutex()
     
     init {
         Logger.d(COMPONENT, "Pipeline created in low memory mode")
@@ -374,15 +377,27 @@ class DiffusersPipeline @Inject constructor(
                 Logger.d(COMPONENT, "=== Model Loading Complete ===")
                 logFinalMemoryState()
 
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 Logger.e(COMPONENT, "Error during model loading", e)
                 cleanup()
-                throw e
+                val message = if (e is OutOfMemoryError) {
+                    "Out of memory while loading model"
+                } else {
+                    "Error during model loading: ${e.message}"
+                }
+                throw ModelLoadException(message, e)
             }
-        } catch (e: Exception) {
+        } catch (e: ModelLoadException) {
+            throw e
+        } catch (e: Throwable) {
             Logger.e(COMPONENT, "Fatal error during model loading", e)
             cleanup()
-            throw e
+            val message = if (e is OutOfMemoryError) {
+                "Out of memory while loading model"
+            } else {
+                "Failed to load model: ${e.message}"
+            }
+            throw ModelLoadException(message, e)
         }
     }
 
@@ -460,6 +475,14 @@ class DiffusersPipeline @Inject constructor(
         performGarbageCollection()
     }
 
+    private fun checkMemoryOrThrow(step: String) {
+        val free = memoryManager.getMemoryInfo().freeMemoryMB
+        if (free < ModelConfig.MemorySettings.BUFFER_MEMORY_MB) {
+            Logger.e(COMPONENT, "Low memory before $step: ${free}MB available")
+            throw OutOfMemoryError("Insufficient memory before $step")
+        }
+    }
+
     suspend fun generateImage(
         prompt: String,
         negativePrompt: String = "",
@@ -469,19 +492,24 @@ class DiffusersPipeline @Inject constructor(
         height: Int = DEFAULT_HEIGHT,
         seed: Long = System.currentTimeMillis(),
         onProgress: suspend (Int) -> Unit = {}
-    ): Bitmap = withContext(Dispatchers.Default) {
-        try {
-            validateAndPrepareInference()
+    ): Bitmap = generationMutex.withLock {
+        withContext(Dispatchers.Default) {
+            try {
+                checkMemoryOrThrow("generation start")
+                validateAndPrepareInference()
             
             // 1. Encode text
+            checkMemoryOrThrow("text encoding")
             val promptEmbedding = encodeText(prompt)
             val negativeEmbedding = if (negativePrompt.isNotEmpty()) {
+                checkMemoryOrThrow("negative text encoding")
                 encodeText(negativePrompt)
             } else {
                 createEmptyEmbedding()
             }
 
             // 2. Generate initial latents
+            checkMemoryOrThrow("initial latent generation")
             var latents = generateInitialLatents(seed, width, height)
 
             // 3. Diffusion process
@@ -490,6 +518,7 @@ class DiffusersPipeline @Inject constructor(
                 val progress = ((step + 1) * 100) / numInferenceSteps
                 onProgress(progress)
 
+                checkMemoryOrThrow("diffusion step ${step + 1}")
                 latents = performDiffusionStep(
                     latents = latents,
                     timestep = timesteps[step],
@@ -500,9 +529,15 @@ class DiffusersPipeline @Inject constructor(
             }
 
             // 4. Decode latents to image
+            checkMemoryOrThrow("VAE decoding")
             decodeLatentsToImage(latents, width, height)
+        } catch (e: OutOfMemoryError) {
+            Logger.e(COMPONENT, "Out of memory generating image", e)
+            cleanup()
+            throw GenerationException("Out of memory during image generation: ${e.message}", e)
         } catch (e: Exception) {
             Logger.e(COMPONENT, "Error generating image", e)
+            cleanup()
             throw GenerationException("Failed to generate image: ${e.message}", e)
         }
     }
