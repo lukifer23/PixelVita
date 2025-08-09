@@ -120,9 +120,10 @@ object AppModule {
     @Provides
     @Singleton
     fun provideModelRepository(
-        diffusionModelDao: DiffusionModelDao
+        diffusionModelDao: DiffusionModelDao,
+        @ApplicationContext context: Context
     ): ModelRepository {
-        return ModelRepository(diffusionModelDao)
+        return ModelRepository(diffusionModelDao, context)
     }
 
     @Provides

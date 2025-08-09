@@ -280,7 +280,12 @@ class OnnxModel(
             }
 
             try {
-                context.assets.open(modelPath).use { input ->
+                val inputStream = if (File(modelPath).exists()) {
+                    File(modelPath).inputStream()
+                } else {
+                    context.assets.open(modelPath)
+                }
+                inputStream.use { input ->
                     // Create temp file first
                     val tempFile = File(cacheDir, "$modelName.tmp")
                     tempFile.outputStream().use { output ->

@@ -10,6 +10,8 @@ import com.example.androiddiffusion.data.state.ModelLoadingState
 import com.example.androiddiffusion.ml.diffusers.DiffusersPipeline
 import com.example.androiddiffusion.config.MemoryManager
 import com.example.androiddiffusion.util.Logger
+import com.example.androiddiffusion.config.QuantizationType
+import com.example.androiddiffusion.data.QuantizationInfo
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.*
@@ -47,6 +49,7 @@ class MainViewModel @Inject constructor(
 
     init {
         viewModelScope.launch {
+            modelRepository.scanAvailableModels()
             modelRepository.getAllModels().collect { models ->
                 _models.value = models
             }
@@ -82,6 +85,10 @@ class MainViewModel @Inject constructor(
         // Do not load the model automatically
     }
 
+    fun selectQuantization(type: QuantizationType) {
+        selectedModel = selectedModel?.copy(quantization = QuantizationInfo(type))
+    }
+
     fun getSelectedModel(): DiffusionModel? = selectedModel
 
     fun loadSelectedModel() {
@@ -107,8 +114,8 @@ class MainViewModel @Inject constructor(
                 // Initialize the pipeline
                 try {
                     diffusersPipeline.loadModel(
-                        modelPath = model.localPath!!,
-                        onProgress = { stage, progress ->
+                        model = model,
+                        onProgress = { _, progress ->
                             _modelLoadingState.value = ModelLoadingState.Loading(progress)
                         }
                     )

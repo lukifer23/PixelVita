@@ -235,7 +235,7 @@ class DiffusersPipeline @Inject constructor(
         }
     }
 
-    suspend fun loadModel(modelPath: String, onProgress: (String, Int) -> Unit) = withContext(Dispatchers.Default) {
+    suspend fun loadModel(model: DiffusionModel, onProgress: (String, Int) -> Unit) = withContext(Dispatchers.Default) {
         try {
             Logger.d(COMPONENT, "=== Starting Model Loading Process ===")
             logInitialMemoryState()
@@ -259,20 +259,23 @@ class DiffusersPipeline @Inject constructor(
             onProgress("memory_check", 10)
 
             // Verify model files exist
-            val requiredFiles = listOf(
-                "$modelPath/text_encoder.onnx",
-                "$modelPath/unet.onnx",
-                "$modelPath/vae_decoder.onnx"
-            )
-            
-            requiredFiles.forEach { path ->
-                try {
-                    context.assets.open(path).use { 
-                        Logger.d(COMPONENT, "Verified model file: $path")
-                        it.close() 
+            val modelPath = model.localPath ?: throw ModelLoadException("Model path not specified", null)
+            val requiredFiles = listOf("text_encoder.onnx", "unet.onnx", "vae_decoder.onnx")
+
+            requiredFiles.forEach { fileName ->
+                val path = "$modelPath/$fileName"
+                val exists = if (modelPath.startsWith("models/")) {
+                    try {
+                        context.assets.open(path).close()
+                        true
+                    } catch (e: Exception) {
+                        false
                     }
-                } catch (e: Exception) {
-                    throw ModelLoadException("Missing required model file: $path", e)
+                } else {
+                    File(path).exists()
+                }
+                if (!exists) {
+                    throw ModelLoadException("Missing required model file: $path", null)
                 }
             }
             onProgress("verify_files", 15)
