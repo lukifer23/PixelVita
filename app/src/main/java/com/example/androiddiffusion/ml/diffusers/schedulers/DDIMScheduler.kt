@@ -1,14 +1,13 @@
 package com.example.androiddiffusion.ml.diffusers.schedulers
 
 import kotlin.math.sqrt
-import kotlin.math.pow
 
-class DDIMScheduler {
+class DDIMScheduler : Scheduler {
     private var timesteps: IntArray = intArrayOf()
     private var alphasCumprod: FloatArray = floatArrayOf()
     private var initialNoiseStd: Float = 1.0f
     
-    fun setTimesteps(numInferenceSteps: Int) {
+    override fun setTimesteps(numInferenceSteps: Int) {
         timesteps = IntArray(numInferenceSteps) { it }
         alphasCumprod = generateAlphasCumprod(numInferenceSteps)
         initialNoiseStd = sqrt(1f / (1f - alphasCumprod.last()))
@@ -30,7 +29,7 @@ class DDIMScheduler {
         return alphasCumprod
     }
     
-    fun step(modelOutput: FloatArray, timestep: Int, sample: FloatArray): FloatArray {
+    override fun step(modelOutput: FloatArray, timestep: Int, sample: FloatArray): FloatArray {
         val stepIndex = timesteps.indexOf(timestep)
         if (stepIndex == -1) {
             throw IllegalArgumentException("Timestep $timestep not found in schedule")
@@ -44,22 +43,19 @@ class DDIMScheduler {
         val sqrtAlphaProdPrev = sqrt(alphaProdPrev)
         val sqrtOneMinusAlphaProdPrev = sqrt(1f - alphaProdPrev)
         
-        val predOriginalSample = FloatArray(sample.size)
-        val prevSample = FloatArray(sample.size)
-        
         for (i in sample.indices) {
-            predOriginalSample[i] = (sample[i] - sqrtOneMinusAlphaProd * modelOutput[i]) / sqrtAlphaProd
-            prevSample[i] = sqrtAlphaProdPrev * predOriginalSample[i] + sqrtOneMinusAlphaProdPrev * modelOutput[i]
+            val predOriginalSample = (sample[i] - sqrtOneMinusAlphaProd * modelOutput[i]) / sqrtAlphaProd
+            sample[i] = sqrtAlphaProdPrev * predOriginalSample + sqrtOneMinusAlphaProdPrev * modelOutput[i]
         }
-        
-        return prevSample
+
+        return sample
     }
     
     private fun lerp(start: Float, end: Float, fraction: Float): Float {
         return start + fraction * (end - start)
     }
     
-    fun getInitialNoiseStd(): Float = initialNoiseStd
-    
-    fun getTimesteps(): IntArray = timesteps.clone()
+    override fun getInitialNoiseStd(): Float = initialNoiseStd
+
+    override fun getTimesteps(): IntArray = timesteps.clone()
 }

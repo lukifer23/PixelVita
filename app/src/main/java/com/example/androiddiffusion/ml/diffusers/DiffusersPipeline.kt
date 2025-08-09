@@ -18,6 +18,7 @@ import com.example.androiddiffusion.util.NativeMemoryManager
 import com.example.androiddiffusion.service.ModelLoadingService
 import com.example.androiddiffusion.util.Logger
 import com.example.androiddiffusion.data.DiffusionModel
+import com.example.androiddiffusion.config.SchedulerType
 
 // Dependency injection
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -39,6 +40,9 @@ import kotlin.math.sqrt
 
 // App-specific imports
 import com.example.androiddiffusion.ml.diffusers.schedulers.DDIMScheduler
+import com.example.androiddiffusion.ml.diffusers.schedulers.DDPMScheduler
+import com.example.androiddiffusion.ml.diffusers.schedulers.EulerScheduler
+import com.example.androiddiffusion.ml.diffusers.schedulers.Scheduler
 import com.example.androiddiffusion.config.UnifiedMemoryManager
 import com.example.androiddiffusion.config.UnifiedMemoryManager.AllocationType
 
@@ -65,7 +69,7 @@ class DiffusersPipeline @Inject constructor(
     private var textEncoder: OnnxModel? = null
     private var unet: OnnxModel? = null
     private var vaeDecoder: OnnxModel? = null
-    private var scheduler: DDIMScheduler? = null
+    private var scheduler: Scheduler? = null
     private var isLowMemoryMode = true
     private var lastGCTime = 0L
     private val GC_INTERVAL_MS = 30000L // 30 seconds between GC calls
@@ -76,6 +80,11 @@ class DiffusersPipeline @Inject constructor(
     private var sessionOptions: OrtSession.SessionOptions? = null
     private var currentModel: DiffusionModel? = null
     private var lastError: Exception? = null
+    private var latentsBuffer: FloatArray? = null
+    private var combinedLatentsBuffer: FloatArray? = null
+    private var combinedEmbeddingsBuffer: FloatArray? = null
+    private var guidedPredBuffer: FloatArray? = null
+    private var scaledLatentsBuffer: FloatArray? = null
     
     init {
         Logger.d(COMPONENT, "Pipeline created in low memory mode")
@@ -280,7 +289,11 @@ class DiffusersPipeline @Inject constructor(
             try {
                 // Step 1: Initialize scheduler (lightweight operation)
                 Logger.d(COMPONENT, "=== Phase 1: Scheduler Initialization ===")
-                scheduler = DDIMScheduler()
+                scheduler = when (ModelConfig.InferenceSettings.SCHEDULER) {
+                    SchedulerType.DDPM -> DDPMScheduler()
+                    SchedulerType.EULER -> EulerScheduler()
+                    else -> DDIMScheduler()
+                }
                 scheduler?.setTimesteps(ModelConfig.InferenceSettings.DEFAULT_STEPS)
                 Logger.d(COMPONENT, "Scheduler initialized successfully")
                 onProgress("scheduler", 20)
@@ -490,7 +503,7 @@ class DiffusersPipeline @Inject constructor(
                 val progress = ((step + 1) * 100) / numInferenceSteps
                 onProgress(progress)
 
-                latents = performDiffusionStep(
+                performDiffusionStep(
                     latents = latents,
                     timestep = timesteps[step],
                     promptEmbedding = promptEmbedding,
@@ -591,7 +604,7 @@ class DiffusersPipeline @Inject constructor(
         Logger.d(COMPONENT, "Latent dimensions: ${latentWidth}x${latentHeight}, total elements: $totalElements")
         
         // Generate random latents using Box-Muller transform
-        val latents = FloatArray(totalElements)
+        val latents = TensorUtils.reuseOrCreateBuffer(latentsBuffer, totalElements)
         var i = 0
         while (i < totalElements) {
             val u1 = random.nextDouble()
@@ -616,6 +629,7 @@ class DiffusersPipeline @Inject constructor(
         }
         
         Logger.memory(COMPONENT)
+        latentsBuffer = latents
         latents
     }
 
@@ -625,7 +639,7 @@ class DiffusersPipeline @Inject constructor(
         promptEmbedding: FloatArray,
         negativeEmbedding: FloatArray,
         guidanceScale: Float
-    ): FloatArray = withContext(Dispatchers.Default) {
+    ) = withContext(Dispatchers.Default) {
         Logger.d(COMPONENT, "Performing diffusion step at timestep: $timestep")
         Logger.memory(COMPONENT)
 
@@ -653,10 +667,22 @@ class DiffusersPipeline @Inject constructor(
             
             Logger.d(COMPONENT, "Creating UNet input tensors")
             
-            // Concatenate latents for conditional and unconditional
-            val combinedLatents = latents + latents
-            val combinedEmbeddings = negativeEmbedding + promptEmbedding
-            
+            // Concatenate latents for conditional and unconditional using reusable buffers
+            val combinedLatents = TensorUtils.reuseOrCreateBuffer(combinedLatentsBuffer, latents.size * 2)
+            for (i in latents.indices) {
+                combinedLatents[i] = latents[i]
+                combinedLatents[i + latents.size] = latents[i]
+            }
+            combinedLatentsBuffer = combinedLatents
+
+            val combinedEmbeddings = TensorUtils.reuseOrCreateBuffer(
+                combinedEmbeddingsBuffer,
+                negativeEmbedding.size + promptEmbedding.size
+            )
+            System.arraycopy(negativeEmbedding, 0, combinedEmbeddings, 0, negativeEmbedding.size)
+            System.arraycopy(promptEmbedding, 0, combinedEmbeddings, negativeEmbedding.size, promptEmbedding.size)
+            combinedEmbeddingsBuffer = combinedEmbeddings
+
             latentTensor = TensorUtils.createInputTensor(combinedLatents, latentShape)
             timestepTensor = TensorUtils.createInputTensor(floatArrayOf(timestep.toFloat()), timestepShape)
             embeddingTensor = TensorUtils.createInputTensor(combinedEmbeddings, embeddingShape)
@@ -675,28 +701,23 @@ class DiffusersPipeline @Inject constructor(
             val noisePred = result["sample"] ?: throw IllegalStateException("No output tensor found")
             val noiseArray = TensorUtils.tensorToFloatArray(noisePred)
             Logger.d(COMPONENT, "UNet inference completed")
-            
-            // Split predictions for unconditional and conditional
             val splitPoint = noiseArray.size / 2
-            val uncondPred = noiseArray.sliceArray(0 until splitPoint)
-            val condPred = noiseArray.sliceArray(splitPoint until noiseArray.size)
-            
-            // Classifier-free guidance
             Logger.d(COMPONENT, "Applying classifier-free guidance with scale: $guidanceScale")
-            val guidedPred = FloatArray(splitPoint)
-            for (i in guidedPred.indices) {
-                guidedPred[i] = uncondPred[i] + guidanceScale * (condPred[i] - uncondPred[i])
+            val guidedPred = TensorUtils.reuseOrCreateBuffer(guidedPredBuffer, splitPoint)
+            for (i in 0 until splitPoint) {
+                val uncond = noiseArray[i]
+                val cond = noiseArray[i + splitPoint]
+                guidedPred[i] = uncond + guidanceScale * (cond - uncond)
             }
-            
-            // Scheduler step
+            guidedPredBuffer = guidedPred
+
+            // Scheduler step (in-place)
             Logger.d(COMPONENT, "Applying scheduler step")
-            val schedulerResult = scheduler!!.step(guidedPred, timestep, latents)
+            scheduler!!.step(guidedPred, timestep, latents)
             Logger.memory(COMPONENT)
-            
+
             // Free tensor memory
             memoryManager.freeMemory("tensor_diffusion_step_$timestep")
-            
-            schedulerResult
         } catch (e: Exception) {
             Logger.e(COMPONENT, "Error in diffusion step", e)
             throw e
@@ -728,8 +749,12 @@ class DiffusersPipeline @Inject constructor(
                 throw OutOfMemoryError("Failed to allocate memory for VAE tensors")
             }
 
-            // Scale latents for VAE decoder
-            val scaledLatents = latents.map { it / 0.18215f }.toFloatArray()
+            // Scale latents for VAE decoder using reusable buffer
+            val scaledLatents = TensorUtils.reuseOrCreateBuffer(scaledLatentsBuffer, latents.size)
+            for (i in latents.indices) {
+                scaledLatents[i] = latents[i] / 0.18215f
+            }
+            scaledLatentsBuffer = scaledLatents
             
             // Create input tensor for VAE
             val shape = longArrayOf(BATCH_SIZE.toLong(), LATENT_CHANNELS.toLong(), (height / 8).toLong(), (width / 8).toLong())
