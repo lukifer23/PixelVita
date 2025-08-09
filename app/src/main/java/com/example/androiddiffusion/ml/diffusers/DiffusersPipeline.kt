@@ -13,8 +13,6 @@ import ai.onnxruntime.TensorInfo
 
 // App imports
 import com.example.androiddiffusion.config.ModelConfig
-import com.example.androiddiffusion.config.MemoryManager
-import com.example.androiddiffusion.util.NativeMemoryManager
 import com.example.androiddiffusion.service.ModelLoadingService
 import com.example.androiddiffusion.util.Logger
 import com.example.androiddiffusion.data.DiffusionModel

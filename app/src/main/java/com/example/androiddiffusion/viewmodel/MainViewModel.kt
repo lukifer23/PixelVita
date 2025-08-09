@@ -1,6 +1,5 @@
 package com.example.androiddiffusion.viewmodel
 
-import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.androiddiffusion.data.DiffusionModel
@@ -8,10 +7,9 @@ import com.example.androiddiffusion.data.ModelRepository
 import com.example.androiddiffusion.data.state.GenerationState
 import com.example.androiddiffusion.data.state.ModelLoadingState
 import com.example.androiddiffusion.ml.diffusers.DiffusersPipeline
-import com.example.androiddiffusion.config.MemoryManager
+import com.example.androiddiffusion.config.UnifiedMemoryManager
 import com.example.androiddiffusion.util.Logger
 import dagger.hilt.android.lifecycle.HiltViewModel
-import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -25,11 +23,8 @@ class MainViewModel @Inject constructor(
     private val modelRepository: ModelRepository,
     private val diffusersPipeline: DiffusersPipeline,
     private val modelDownloadManager: ModelDownloadManager,
-    @ApplicationContext private val context: Context
+    val memoryManager: UnifiedMemoryManager
 ) : ViewModel() {
-
-    private val _memoryManager = MemoryManager(context)
-    val memoryManager: MemoryManager get() = _memoryManager
 
     private val _generationState = MutableStateFlow<GenerationState>(GenerationState.Idle)
     val generationState: StateFlow<GenerationState> = _generationState.asStateFlow()

@@ -13,7 +13,7 @@ import com.example.androiddiffusion.data.AppDatabase
 import com.example.androiddiffusion.data.DiffusionModel
 import com.example.androiddiffusion.data.ModelType
 import com.example.androiddiffusion.config.ModelConfig
-import com.example.androiddiffusion.config.MemoryManager
+import com.example.androiddiffusion.config.UnifiedMemoryManager
 import com.example.androiddiffusion.ml.diffusers.DiffusersPipeline
 import com.example.androiddiffusion.util.ActivityLifecycleCallback
 import com.example.androiddiffusion.util.Logger
@@ -38,7 +38,7 @@ class DiffusionApplication : Application() {
     lateinit var diffusersPipeline: DiffusersPipeline
     
     @Inject
-    lateinit var memoryManager: MemoryManager
+    lateinit var memoryManager: UnifiedMemoryManager
     
     @Inject
     lateinit var logger: Logger
@@ -61,7 +61,7 @@ class DiffusionApplication : Application() {
         fun getAppContext(): Context = getInstance().applicationContext
         
         fun getDatabase(): AppDatabase = getInstance()._database
-        fun getMemoryManager(): MemoryManager = getInstance().memoryManager
+        fun getMemoryManager(): UnifiedMemoryManager = getInstance().memoryManager
         fun getMemoryLeakDetector(): MemoryLeakDetector = getInstance().memoryLeakDetector
     }
     
@@ -196,9 +196,11 @@ class DiffusionApplication : Application() {
         Logger.d(TAG, "- Available: ${nativeMemory}MB")
         
         Logger.d(TAG, "Memory Manager State:")
-        Logger.d(TAG, "- Available: ${memoryManager.getAvailableMemory()}MB")
-        Logger.d(TAG, "- Total: ${memoryManager.getTotalMemory()}MB")
-        Logger.d(TAG, "- Limit: ${memoryManager.getEffectiveMemoryLimit()}MB")
+        val memoryInfo = memoryManager.getMemoryInfo()
+        Logger.d(TAG, "- Free: ${memoryInfo.freeMemoryMB}MB")
+        Logger.d(TAG, "- Total: ${memoryInfo.totalMemoryMB}MB")
+        Logger.d(TAG, "- Used: ${memoryInfo.usedMemoryMB}MB")
+        Logger.d(TAG, "- Native Allocated: ${memoryInfo.nativeAllocatedMB}MB")
     }
     
     private fun initializeComponentsWithLogging() {
@@ -222,18 +224,24 @@ class DiffusionApplication : Application() {
     private fun setupMemoryManagementWithLogging() {
         Logger.d(TAG, "=== Setting up Memory Management ===")
         
-        // Configure aggressive memory management
-        memoryManager.apply {
-            Logger.d(TAG, "Configuring memory thresholds:")
-            setLowMemoryThreshold(0.2f)
-            Logger.d(TAG, "- Low memory threshold: 20%")
-            setCriticalMemoryThreshold(0.1f)
-            Logger.d(TAG, "- Critical memory threshold: 10%")
-            setTargetMemoryUtilization(0.7f)
-            Logger.d(TAG, "- Target utilization: 70%")
-            enableAggressiveGC(true)
-            Logger.d(TAG, "Aggressive GC enabled")
-        }
+        val config = UnifiedMemoryManager.MemoryConfiguration(
+            minMemoryMB = UnifiedMemoryManager.DEFAULT_MIN_MEMORY_MB,
+            maxMemoryMB = UnifiedMemoryManager.DEFAULT_MAX_MEMORY_MB,
+            targetMemoryMB = UnifiedMemoryManager.DEFAULT_TARGET_MEMORY_MB,
+            lowMemoryThreshold = 0.2f,
+            criticalMemoryThreshold = 0.1f,
+            targetUtilization = 0.7f,
+            isLowMemoryMode = false,
+            enableAggressiveGC = true
+        )
+
+        Logger.d(TAG, "Configuring memory thresholds:")
+        Logger.d(TAG, "- Low memory threshold: 20%")
+        Logger.d(TAG, "- Critical memory threshold: 10%")
+        Logger.d(TAG, "- Target utilization: 70%")
+        Logger.d(TAG, "Aggressive GC enabled")
+
+        memoryManager.updateConfiguration(config)
         
         logDetailedMemoryState("After Memory Management Setup")
     }
@@ -328,22 +336,22 @@ class DiffusionApplication : Application() {
         registerActivityLifecycleCallbacks(ActivityLifecycleCallback(
             onTrimMemory = { level ->
                 Logger.d(TAG, "Trim memory level: $level")
-                memoryManager.handleTrimMemory(level)
+                memoryManager.onTrimMemory(level)
             },
             onLowMemory = {
                 Logger.d(TAG, "Low memory")
-                memoryManager.handleLowMemory()
+                memoryManager.onLowMemory()
             }
         ))
     }
-    
+
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
-        memoryManager.handleTrimMemory(level)
+        memoryManager.onTrimMemory(level)
     }
-    
+
     override fun onLowMemory() {
         super.onLowMemory()
-        memoryManager.handleLowMemory()
+        memoryManager.onLowMemory()
     }
-} 
+}

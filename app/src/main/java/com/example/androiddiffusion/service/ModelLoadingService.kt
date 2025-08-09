@@ -13,7 +13,7 @@ import java.lang.reflect.Method
 import androidx.core.app.NotificationCompat
 import com.example.androiddiffusion.MainActivity
 import com.example.androiddiffusion.R
-import com.example.androiddiffusion.config.MemoryManager
+import com.example.androiddiffusion.config.UnifiedMemoryManager
 import com.example.androiddiffusion.ml.diffusers.DiffusersPipeline
 import com.example.androiddiffusion.util.Logger
 import com.example.androiddiffusion.util.NativeMemoryManager
@@ -38,7 +38,7 @@ class ModelLoadingService : Service() {
     }
 
     @Inject
-    lateinit var memoryManager: MemoryManager
+    lateinit var memoryManager: UnifiedMemoryManager
 
     @Inject
     lateinit var nativeMemoryManager: NativeMemoryManager
