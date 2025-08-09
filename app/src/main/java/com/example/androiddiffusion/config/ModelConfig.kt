@@ -96,6 +96,7 @@ object ModelConfig {
         const val ENABLE_VAE_TILING = true
         const val VAE_TILE_SIZE = 512
         const val USE_HALF_PRECISION = true
+        var SCHEDULER = SchedulerType.DDIM
     }
 
     object MemorySettings {
