@@ -2,6 +2,8 @@ package com.example.androiddiffusion.di
 
 import com.example.androiddiffusion.repository.ModelRepository
 import com.example.androiddiffusion.repository.ModelRepositoryImpl
+import com.example.androiddiffusion.repository.DiffusionRepository
+import com.example.androiddiffusion.repository.DiffusionRepositoryImpl
 import dagger.Binds
 import dagger.Module
 import dagger.hilt.InstallIn
@@ -16,4 +18,10 @@ abstract class RepositoryModule {
     abstract fun bindModelRepository(
         modelRepositoryImpl: ModelRepositoryImpl
     ): ModelRepository
-} 
+
+    @Binds
+    @Singleton
+    abstract fun bindDiffusionRepository(
+        diffusionRepositoryImpl: DiffusionRepositoryImpl
+    ): DiffusionRepository
+}

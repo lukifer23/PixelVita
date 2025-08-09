@@ -7,9 +7,10 @@ import com.example.androiddiffusion.data.DiffusionModel
 import com.example.androiddiffusion.data.ModelRepository
 import com.example.androiddiffusion.data.state.GenerationState
 import com.example.androiddiffusion.data.state.ModelLoadingState
-import com.example.androiddiffusion.ml.diffusers.DiffusersPipeline
 import com.example.androiddiffusion.config.MemoryManager
 import com.example.androiddiffusion.util.Logger
+import com.example.androiddiffusion.repository.DiffusionRepository
+import android.graphics.Bitmap
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.*
@@ -23,7 +24,7 @@ private const val TAG = "MainViewModel"
 @HiltViewModel
 class MainViewModel @Inject constructor(
     private val modelRepository: ModelRepository,
-    private val diffusersPipeline: DiffusersPipeline,
+    private val diffusionRepository: DiffusionRepository,
     private val modelDownloadManager: ModelDownloadManager,
     @ApplicationContext private val context: Context
 ) : ViewModel() {
@@ -106,7 +107,7 @@ class MainViewModel @Inject constructor(
 
                 // Initialize the pipeline
                 try {
-                    diffusersPipeline.loadModel(
+                    diffusionRepository.loadModel(
                         modelPath = model.localPath!!,
                         onProgress = { stage, progress ->
                             _modelLoadingState.value = ModelLoadingState.Loading(progress)
@@ -142,7 +143,7 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch {
             try {
                 _generationState.value = GenerationState.Loading(0)
-                val image = diffusersPipeline.generateImage(
+                val image = diffusionRepository.generateImage(
                     prompt = prompt,
                     negativePrompt = negativePrompt,
                     numInferenceSteps = steps,
@@ -158,8 +159,78 @@ class MainViewModel @Inject constructor(
         }
     }
 
+    fun imageToImage(
+        prompt: String,
+        inputImage: Bitmap,
+        negativePrompt: String = "",
+        steps: Int = 20,
+        strength: Float = 0.8f,
+        seed: Long = System.currentTimeMillis()
+    ) {
+        if (_modelLoadingState.value !is ModelLoadingState.Loaded) {
+            Logger.e(TAG, "Cannot generate image: Model not loaded")
+            _generationState.value = GenerationState.Error("Model not loaded")
+            return
+        }
+
+        viewModelScope.launch {
+            try {
+                _generationState.value = GenerationState.Loading(0)
+                val image = diffusionRepository.imageToImage(
+                    prompt = prompt,
+                    inputImage = inputImage,
+                    negativePrompt = negativePrompt,
+                    numInferenceSteps = steps,
+                    strength = strength,
+                    seed = seed
+                ) { progress ->
+                    _generationState.value = GenerationState.Loading(progress)
+                }
+                _generationState.value = GenerationState.Complete(image)
+            } catch (e: Exception) {
+                Logger.e(TAG, "Failed to generate image: ${e.message}", e)
+                _generationState.value = GenerationState.Error(e.message ?: "Unknown error")
+            }
+        }
+    }
+
+    fun inpaint(
+        prompt: String,
+        inputImage: Bitmap,
+        mask: Bitmap,
+        negativePrompt: String = "",
+        steps: Int = 20,
+        seed: Long = System.currentTimeMillis()
+    ) {
+        if (_modelLoadingState.value !is ModelLoadingState.Loaded) {
+            Logger.e(TAG, "Cannot generate image: Model not loaded")
+            _generationState.value = GenerationState.Error("Model not loaded")
+            return
+        }
+
+        viewModelScope.launch {
+            try {
+                _generationState.value = GenerationState.Loading(0)
+                val image = diffusionRepository.inpaint(
+                    prompt = prompt,
+                    inputImage = inputImage,
+                    mask = mask,
+                    negativePrompt = negativePrompt,
+                    numInferenceSteps = steps,
+                    seed = seed
+                ) { progress ->
+                    _generationState.value = GenerationState.Loading(progress)
+                }
+                _generationState.value = GenerationState.Complete(image)
+            } catch (e: Exception) {
+                Logger.e(TAG, "Failed to generate image: ${e.message}", e)
+                _generationState.value = GenerationState.Error(e.message ?: "Unknown error")
+            }
+        }
+    }
+
     fun cleanup() {
-        diffusersPipeline.cleanup()
+        diffusionRepository.cleanup()
         _modelLoadingState.value = ModelLoadingState.NotLoaded
         selectedModel = null
     }
