@@ -481,6 +481,8 @@ class DiffusersPipeline @Inject constructor(
         width: Int = DEFAULT_WIDTH,
         height: Int = DEFAULT_HEIGHT,
         seed: Long = System.currentTimeMillis(),
+        initImage: FloatArray? = null,
+        mask: FloatArray? = null,
         onProgress: suspend (Int) -> Unit = {}
     ): Bitmap = withContext(Dispatchers.Default) {
         try {
@@ -495,7 +497,7 @@ class DiffusersPipeline @Inject constructor(
             }
 
             // 2. Generate initial latents
-            var latents = generateInitialLatents(seed, width, height)
+            var latents = initImage ?: generateInitialLatents(seed, width, height)
 
             // 3. Diffusion process
             val timesteps = scheduler!!.getTimesteps()
@@ -510,6 +512,12 @@ class DiffusersPipeline @Inject constructor(
                     negativeEmbedding = negativeEmbedding,
                     guidanceScale = guidanceScale
                 )
+
+                if (initImage != null && mask != null) {
+                    for (i in latents.indices) {
+                        latents[i] = initImage[i] * mask[i] + latents[i] * (1f - mask[i])
+                    }
+                }
             }
 
             // 4. Decode latents to image
@@ -518,6 +526,64 @@ class DiffusersPipeline @Inject constructor(
             Logger.e(COMPONENT, "Error generating image", e)
             throw GenerationException("Failed to generate image: ${e.message}", e)
         }
+    }
+
+    suspend fun imageToImage(
+        prompt: String,
+        inputImage: Bitmap,
+        negativePrompt: String = "",
+        numInferenceSteps: Int = ModelConfig.InferenceSettings.DEFAULT_STEPS,
+        guidanceScale: Float = ModelConfig.InferenceSettings.DEFAULT_GUIDANCE_SCALE,
+        strength: Float = 0.8f,
+        width: Int = DEFAULT_WIDTH,
+        height: Int = DEFAULT_HEIGHT,
+        seed: Long = System.currentTimeMillis(),
+        onProgress: suspend (Int) -> Unit = {}
+    ): Bitmap {
+        val initLatents = preprocessImageToLatents(inputImage, width, height)
+        val noise = generateInitialLatents(seed, width, height)
+        for (i in initLatents.indices) {
+            initLatents[i] = initLatents[i] * (1f - strength) + noise[i] * strength
+        }
+        return generateImage(
+            prompt = prompt,
+            negativePrompt = negativePrompt,
+            numInferenceSteps = numInferenceSteps,
+            guidanceScale = guidanceScale,
+            width = width,
+            height = height,
+            seed = seed,
+            initImage = initLatents,
+            onProgress = onProgress
+        )
+    }
+
+    suspend fun inpaint(
+        prompt: String,
+        inputImage: Bitmap,
+        mask: Bitmap,
+        negativePrompt: String = "",
+        numInferenceSteps: Int = ModelConfig.InferenceSettings.DEFAULT_STEPS,
+        guidanceScale: Float = ModelConfig.InferenceSettings.DEFAULT_GUIDANCE_SCALE,
+        width: Int = DEFAULT_WIDTH,
+        height: Int = DEFAULT_HEIGHT,
+        seed: Long = System.currentTimeMillis(),
+        onProgress: suspend (Int) -> Unit = {}
+    ): Bitmap {
+        val initLatents = preprocessImageToLatents(inputImage, width, height)
+        val maskTensor = preprocessMask(mask, width, height)
+        return generateImage(
+            prompt = prompt,
+            negativePrompt = negativePrompt,
+            numInferenceSteps = numInferenceSteps,
+            guidanceScale = guidanceScale,
+            width = width,
+            height = height,
+            seed = seed,
+            initImage = initLatents,
+            mask = maskTensor,
+            onProgress = onProgress
+        )
     }
 
     private fun validateAndPrepareInference() {
@@ -631,6 +697,40 @@ class DiffusersPipeline @Inject constructor(
         Logger.memory(COMPONENT)
         latentsBuffer = latents
         latents
+    }
+
+    private fun preprocessImageToLatents(image: Bitmap, width: Int, height: Int): FloatArray {
+        val latentWidth = width / 8
+        val latentHeight = height / 8
+        val resized = Bitmap.createScaledBitmap(image, latentWidth, latentHeight, true)
+        val imageTensor = TensorUtils.bitmapToFloatArray(resized)
+        val hw = latentWidth * latentHeight
+        val latents = FloatArray(LATENT_CHANNELS * hw)
+        for (i in 0 until hw) {
+            latents[i] = imageTensor[i]
+            latents[i + hw] = imageTensor[i + hw]
+            latents[i + 2 * hw] = imageTensor[i + 2 * hw]
+            latents[i + 3 * hw] = 0f
+        }
+        return latents
+    }
+
+    private fun preprocessMask(mask: Bitmap, width: Int, height: Int): FloatArray {
+        val latentWidth = width / 8
+        val latentHeight = height / 8
+        val resized = Bitmap.createScaledBitmap(mask, latentWidth, latentHeight, true)
+        val pixels = IntArray(latentWidth * latentHeight)
+        resized.getPixels(pixels, 0, latentWidth, 0, 0, latentWidth, latentHeight)
+        val hw = latentWidth * latentHeight
+        val result = FloatArray(LATENT_CHANNELS * hw)
+        for (i in 0 until hw) {
+            val color = pixels[i]
+            val v = (color shr 16 and 0xFF) / 255f
+            for (c in 0 until LATENT_CHANNELS) {
+                result[i + c * hw] = v
+            }
+        }
+        return result
     }
 
     private suspend fun performDiffusionStep(
